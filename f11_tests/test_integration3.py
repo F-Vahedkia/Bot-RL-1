@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 import os
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 # ensure project root is on path
@@ -94,13 +94,14 @@ def main():
         "mt5_credentials.password",
         "mt5_credentials.server",
     ]
+    
     missing = check_config_keys(config, required)
     if missing:
         print("Missing required config keys (populate via .env or config.yaml):", missing)
         print("Aborting integration test.")
         return 2
 
-    # create a single connector and initialize it once
+    # 1) create a single connector and initialize it once
     print("-> testing MT5Connector.initialize()")
     connector = MT5Connector()
     init_retry = config.get("download_defaults", {}).get("initialize_retry", {"max_retries": 10, "retry_delay": 2})
@@ -192,9 +193,10 @@ def main():
             dh_cfg = {
                 "symbols": [symbol],
                 "timeframe": tf,
-                "start_date": (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d"),
-                "end_date": datetime.utcnow().strftime("%Y-%m-%d"),
+                "start_date": (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d"),
+                "end_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             }
+            
             # If DataHandler accepts connector param, pass the same connector (best-effort)
             try:
                 handler = DataHandler(dh_cfg, connector=connector)  # some implementations accept connector
