@@ -12,7 +12,7 @@ Executor — رابط ارسال و مدیریت سفارشات زنده به Me
 نکات:
 - این ماژول فرض می‌کند logging قبلاً مقداردهی شده است (configure_logging()).
   اگر نه، آن را لود می‌کند (با حفاظت در برابر double-init).
-- برای محاسبه لات و ارزش پیپ از f13_risk.risk_manager استفاده می‌شود.
+- برای محاسبه لات و ارزش پیپ از f10_utils.risk_manager استفاده می‌شود.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ import MetaTrader5 as mt5  # type: ignore
 
 from f10_utils.config_loader import config, load_config
 from f02_data.mt5_connector import MT5Connector
-from f13_risk.risk_manager import compute_lot_size_by_risk, pip_value_per_lot, validate_lot
+from f10_utils.risk_manager import compute_lot_size_by_risk, pip_value_per_lot, validate_lot
 from f10_utils.logging_cfg import configure_logging
 
 logger = logging.getLogger(__name__)

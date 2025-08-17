@@ -52,7 +52,7 @@ try:
 except Exception:
     DataHandler = None
 
-from f13_risk.risk_manager import compute_lot_size_by_risk, pip_value_per_lot
+from f10_utils.risk_manager import compute_lot_size_by_risk, pip_value_per_lot
 
 # executor_3 is your current executor file (safe: we will not call order_send)
 try:
