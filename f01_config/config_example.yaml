@@ -1,0 +1,141 @@
+# f01_config/config.yaml
+# ---------------------
+# تنظیمات مرکزی ربات — این فایل باید امن نگهداری شود
+# (در repo عمومی قرار نگیرد؛ حداقل config.yaml را در .gitignore بگذارید)
+
+# اطلاعات ورود MT5 (برای تست می‌توانید مقداردهی کنید، اما در PROD از env/vault استفاده کنید)
+mt5_credentials:
+  login: 0            # شماره حساب (مثال)
+  password: "_"      # رمز عبور حساب — در PROD از secret استفاده کنید
+  server: "_"  # نام سرور متاتریدر
+
+# نمادهایی که ربات باید با آن‌ها کار کند
+symbols:
+  - XAUUSD
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+  - AUDUSD
+  - USDCAD
+  - USDCHF
+
+# تایم‌فریم‌های مورد استفاده در دانلود داده‌ها و آموزش
+timeframes:
+  - M1
+  - M5
+  - M30
+  - H4
+  - D1
+  - W1
+
+# تنظیمات پیش‌فرض دانلود / batch
+download_defaults:
+  num_bars: 12000
+  initialize_retry:
+    max_retries: 60
+    retry_delay: 5   # seconds
+
+# مسیرهای ذخیره‌سازی داده، لاگ و مدل
+data_paths:
+  price_data: f02_data/price/
+  fundamental_data: f02_data/fundamental/
+  logs: logs/
+  models: f14_models/
+  results: results/
+  backups: backups/
+
+# گزینه‌های عمومی مربوط به لاگ و timezone
+logging:
+  level: INFO
+  log_dir: logs
+  log_file: bot.log
+  rotate: true
+timezone: "Europe/Berlin"
+
+alerts:
+  telegram:
+    bot_token: "123456789:ABCDEF..."   # توکن ربات تلگرام
+    chat_id: "987654321"               # آیدی یا یوزرنیم چت
+
+# تنظیمات حجم معامله و ریسک
+volume_settings:
+  min_volume: 0.01
+  volume_step: 0.01
+  auto_volume: true
+  risk_per_trade_percent: 1.0
+
+leverage: 200
+
+# آیا اطلاعات حساب به صورت دوره‌ای گرفته شود و کدام فیلدها
+account_info_fetch:
+  enabled: true
+  parameters:
+    - equity
+    - balance
+    - margin
+    - free_margin
+  interval_minutes: 5
+
+# سیاست بستن معاملات
+close_trades_policy:
+  mode: "learned_by_rl"
+  description: "ربات تصمیم می‌گیرد که آیا معاملات در پایان روز بسته شوند یا نه"
+
+# پارامترهای RL
+rl_parameters:
+  algorithm: PPO
+  framework: stable-baselines3
+  environment: custom_trading_env
+  hyperparameters:
+    learning_rate: 0.0003
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_range: 0.2
+    n_steps: 2048
+    ent_coef: 0.01
+    vf_coef: 0.5
+    batch_size: 64
+    n_epochs: 10
+
+# منبع داده‌های فاندامنتال / تقویم اقتصادی
+fundamental_data_source:
+  name: ForexFactory
+  url: "https://www.forexfactory.com/calendar"
+  fetch_schedule: "daily"
+  storage: f02_data/fundamental/
+  required_fields:
+    - time
+    - currency
+    - impact
+    - event
+    - actual
+    - forecast
+    - previous
+
+# تنظیمات اجتناب از اخبار (news avoidance)
+news_avoidance:
+  enabled: true
+  avoidance_window_minutes:
+    before: 15
+    after: 20
+  high_impact_only: true
+  applicable_symbols:
+    - XAUUSD
+    - EURUSD
+    - GBPUSD
+    - USDJPY
+    - AUDUSD
+    - USDCAD
+    - USDCHF
+
+# مقادیر پیش‌فرض برای DataHandler (اگر از آن استفاده می‌کنید)
+data_fetch_defaults:
+  start_date: "2025-01-01"   # یا null برای استفاده از lookback_days
+  end_date: null
+  lookback_days: 365         # اگر start_date/end_date مشخص نشود از این استفاده شود
+
+# راهنمای امنیت سریع:
+# - توصیه می‌شود mt5_credentials را در CI/CD یا VPS از طریق ENV vars یا vault قرار دهید.
+# - اگر می‌خواهید ConfigLoader در زمان اجرا از env بخواند، می‌توانید مانند:
+#     MT5_LOGIN=${MT5_LOGIN} MT5_PASSWORD=${MT5_PASSWORD} python fetch_data.py
+#   یا ConfigLoader را طوری گسترش دهید که ابتدا از متغیرهای محیطی چک کند.
