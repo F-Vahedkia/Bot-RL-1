@@ -140,19 +140,19 @@ data_fetch_defaults:
 #     MT5_LOGIN=${MT5_LOGIN} MT5_PASSWORD=${MT5_PASSWORD} python fetch_data.py
 #   یا ConfigLoader را طوری گسترش دهید که ابتدا از متغیرهای محیطی چک کند.
 
-# for env
-# اضافه شود (نمونه)
-symbol: "XAUUSD"                 # یا از symbols[0] استفاده می‌شود
-initial_balance: 10000
-n_candles_per_tf: 15            # برای trading_env
-# (برای سازگاری با DataHandler که ممکن است n_candles را بخواهد)
-n_candles: 15
+env_defaults:
+  # اضافه شوند (نمونه)        
+  symbol: "XAUUSD"                 # یا از symbols[0] استفاده می‌شود
+  initial_balance: 10000
+  n_candles_per_tf: 15            # برای trading_env
+  # (برای سازگاری با DataHandler که ممکن است n_candles را بخواهد)
+  n_candles: 15
 
-max_lot: 1.0
-trailing_distance: 0.005
-trailing_trigger: 0.01
-riskfree_profit_threshold: 0.005
+  max_lot: 1.0
+  trailing_distance: 0.005
+  trailing_trigger: 0.01
+  riskfree_profit_threshold: 0.005
 
-# اگر می‌خواهی start/end در سطح بالا هم قابل دسترس باشند (یا DataHandler را تغییر بده)
-start_date: "2025-01-01"   # یا null
-end_date: null
+  # اگر می‌خواهی start/end در سطح بالا هم قابل دسترس باشند (یا DataHandler را تغییر بده)
+  start_date: "2025-01-01"   # یا null
+  end_date: null
