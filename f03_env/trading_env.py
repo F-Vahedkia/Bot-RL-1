@@ -489,16 +489,28 @@ class TradingEnv(gym.Env):
             else:
                 tp_price = price + direction * (tp_frac * price)
 
+        #------ قطعه مد اصافه شده -------------------------
+        # pip size fallback: از self.pip_size استفاده کن (موجود در cfg) یا 0.0001
+        pip_size = float(getattr(self, "pip_size", 0.0001))
+        sl_pips = None
+        tp_pips = None
+        if sl_price is not None and not math.isnan(price):
+            sl_pips = abs(price - sl_price) / pip_size
+        if tp_price is not None and not math.isnan(price):
+            tp_pips = abs(price - tp_price) / pip_size
+        #--------------------------------------------------
+
         # try to place order via Executor
         placed = False
         order_info = {}
         if self.executor is not None:
             # try common method names
             try_methods = [
-                ("place_market_order", {"symbol": self.symbol, "side": "buy" if direction == 1 else "sell", "lot": lot, "sl": sl_price, "tp": tp_price, "trailing": trailing_flag}),
-                ("execute_order", {"symbol": self.symbol, "side": "buy" if direction == 1 else "sell", "lot_size": lot, "sl": sl_price, "tp": tp_price}),
-                ("open_position", {"symbol": self.symbol, "direction": direction, "volume": lot, "sl": sl_price, "tp": tp_price}),
+                ("place_market_order", {"symbol": self.symbol, "side": "buy" if direction == 1 else "sell", "lot": lot, "sl": sl_price, "tp": tp_price, "sl_pips": sl_pips, "tp_pips": tp_pips, "trailing": trailing_flag, "deviation": int(getattr(self.executor, "default_deviation", 20))}),
+                ("execute_order",      {"symbol": self.symbol, "side": "buy" if direction == 1 else "sell", "lot": lot, "sl": sl_price, "tp": tp_price, "sl_pips": sl_pips, "tp_pips": tp_pips,}),
+                ("open_position",      {"symbol": self.symbol, "direction": direction,                      "lot": lot, "sl": sl_price, "tp": tp_price, "sl_pips": sl_pips, "tp_pips": tp_pips,}),
             ]
+            
             for m, kwargs in try_methods:
                 if hasattr(self.executor, m):
                     try:
