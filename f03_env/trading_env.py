@@ -518,7 +518,8 @@ class TradingEnv(gym.Env):
                         res = fn(**kwargs)
                         # interpret result: expect dict with success flag or truthy result
                         if isinstance(res, dict):
-                            ok = res.get("success", True)  # default True if no explicit key
+                            # old & Changed:  ok = res.get("success", True)  # default True if no explicit key
+                            ok = bool(res.get("ok", res.get("success", False)))
                             order_info = res
                         else:
                             ok = bool(res)
