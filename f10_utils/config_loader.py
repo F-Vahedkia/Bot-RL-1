@@ -135,7 +135,6 @@ class ConfigLoader:
         """بازگردانی کل config؛ اگر copy=True یک کپی سطحی برمی‌گرداند."""
         return dict(self.config) if copy else self.config
         
-
 # یک instance آماده برای import راحت
 config = ConfigLoader().get_all()
 

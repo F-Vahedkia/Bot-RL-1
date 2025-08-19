@@ -1,4 +1,4 @@
-# data/mt5_connector.py
+# f02_data/mt5_connector.py
 """
 MT5Connector
 - مدیریت اتصال/قطع اتصال به MetaTrader5
@@ -48,7 +48,7 @@ class MT5Connector:
         logger.critical("All attempts to connect to MT5 failed.")
         return False
 
-    def ensure_connection(self) -> bool:
+    def ensure_connection_old(self) -> bool:
         """
         اگر اتصال قطع بود، تلاش می‌کند دوباره وصل شود (با استفاده از initialize).
         """
@@ -56,6 +56,39 @@ class MT5Connector:
             logger.warning("MT5 not connected — attempting reconnect...")
             return self.initialize()
         return True
+
+    def ensure_connection(self) -> bool:
+        """
+        Verify actual MT5 connection (using mt5.account_info()).
+        If not connected, try to re-initialize (initialize() does its own retries).
+        Returns True only if connection is actually established.
+        """
+        try:
+            # quick sanity check to see if MT5 reports account info
+            acct = mt5.account_info()
+            if acct is not None:
+                # real connection is alive
+                self.connected = True
+                return True
+        except Exception:
+            # account_info failed -> treat as not connected
+            pass
+
+        logger.warning("MT5: account_info check failed or not connected — attempting reinitialize()")
+        ok = False
+        try:
+            ok = self.initialize()  # initialize() should perform retries and set self.connected accordingly
+        except Exception as ex:
+            logger.exception("MT5: initialize() raised while trying to reconnect: %s", ex)
+            ok = False
+
+        self.connected = bool(ok)
+        if not ok:
+            logger.error("MT5: unable to re-establish connection after retries")
+        else:
+            logger.info("MT5: reconnected successfully")
+
+        return ok
 
     def shutdown(self):
         """قطع اتصال از MT5 و بروزرسانی وضعیت داخلی."""

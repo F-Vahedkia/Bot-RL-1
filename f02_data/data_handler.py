@@ -12,11 +12,9 @@ Behavior:
     - If start_date/end_date provided, prefer range-fetching methods.
     - Standardize OHLC columns.
 """
-
 from datetime import datetime
 from typing import Dict, List, Optional
 import logging
-
 import pandas as pd
 import numpy as np
 
@@ -32,7 +30,6 @@ try:
     from f02_data.mt5_connector import MT5Connector
 except Exception:
     MT5Connector = None
-
 
 def _ensure_ohlc_cols(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -67,7 +64,6 @@ def _ensure_ohlc_cols(df: pd.DataFrame) -> pd.DataFrame:
     if not expected.issubset(set(df.columns.str.lower())):
         logger.debug("DataFrame missing some OHLC columns. cols=%s", df.columns.tolist())
     return df
-
 
 class DataHandler:
     def __init__(self, config: Dict):

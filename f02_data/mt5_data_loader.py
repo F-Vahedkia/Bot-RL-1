@@ -13,17 +13,14 @@ MT5DataLoader
 - متد close() برای بستن ایمن کانکتور در صورت نیاز
 """
 
-from __future__ import annotations
-
 import logging
 import time
+import pandas as pd
+from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Dict, Any, Set
-
-import pandas as pd
-
-from f10_utils.config_loader import config
 from f02_data.mt5_connector import MT5Connector
+from f10_utils.config_loader import config
 
 logger = logging.getLogger(__name__)
 # کاهش صدای لاگ داخلی MT5 (در صورت نیاز)
@@ -31,7 +28,6 @@ try:
     logging.getLogger("MetaTrader5").setLevel(logging.WARNING)
 except Exception:
     pass
-
 
 class MT5DataLoader:
     def __init__(self, connector: Optional[MT5Connector] = None, cfg: Optional[Dict[str, Any]] = None):
@@ -103,7 +99,7 @@ class MT5DataLoader:
                 logger.exception("Error while ensuring external connector")
                 return False
 
-    def fetch_and_save_all(
+    def fetch_and_save_all(  
         self,
         num_bars: Optional[int] = None,
         initialize_retry: Optional[Dict[str, int]] = None,
