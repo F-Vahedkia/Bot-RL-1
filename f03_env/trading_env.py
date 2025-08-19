@@ -162,6 +162,25 @@ class TradingEnv(gym.Env):
         if DataHandler is None:
             logger.error("DataHandler not available. TradingEnv cannot load market data.")
             raise RuntimeError("DataHandler missing")
+        
+        #---------------قطعه کد اضافه شده --------------------------
+        # normalize config so DataHandler and TradingEnv agree
+        df = self.config.get("data_fetch_defaults", {}) or {}
+        # prefer explicit top-level, else nested
+        if "n_candles_per_tf" in self.config:
+            self.config["n_candles"] = int(self.config["n_candles_per_tf"])
+        elif "n_candles" not in self.config and "n_candles" in df:
+            self.config["n_candles"] = int(df.get("n_candles"))
+
+        if "start_date" not in self.config and df.get("start_date"):
+            self.config["start_date"] = df.get("start_date")
+        if "end_date" not in self.config and df.get("end_date"):
+            self.config["end_date"] = df.get("end_date")
+
+        # ensure DataHandler uses same timeframes
+        self.config["timeframes"] = self.timeframes
+        #---------------------------------------------------------------
+        
         try:
             # prefer ctor that accepts dict
             self.data_handler = DataHandler(self.cfg)
@@ -212,10 +231,10 @@ class TradingEnv(gym.Env):
             elif hasattr(self.data_handler, "fetch_all"):
                 all_ = self.data_handler.fetch_all()
                 self.market_data = all_.get(self.symbol, {}) if isinstance(all_, dict) else {}
-            elif hasattr(self.data_handler, "fetch_ohlc"):
+            elif hasattr(self.data_handler, "fetch_for_symbol"):
                 # fallback: use single timeframe from data_handler
                 tf = getattr(self.data_handler, "timeframe", self.timeframes[0])
-                df = self.data_handler.fetch_ohlc(self.symbol)
+                df = self.data_handler.fetch_for_symbol(self.symbol)
                 self.market_data[tf] = df if df is not None else pd.DataFrame()
             else:
                 logger.warning("DataHandler has no known fetch method; market_data empty.")
