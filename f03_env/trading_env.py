@@ -681,33 +681,88 @@ class TradingEnv(gym.Env):
 
     def _estimate_free_margin(self) -> float:
         """
-        Estimate free margin using the risk_manager utilities.
-        Falls back to a conservative approximation if risk_manager is not available.
+        Robust estimate of free margin.
+
+        Strategy (priority):
+        1. If self.risk is a RiskManager instance with get_free_margin(...) -> use it.
+        2. If self.risk is the risk_manager module exposing used_margin_from_positions(...) and get_free_margin(...) -> use them.
+        3. Fallback: compute rough used margin from open positions:
+            used_margin += (lot * contract_size * price) / leverage
+        where contract_size is taken from risk.get_symbol_info() if available, else sensible defaults.
+        Returns free margin = max(0.0, balance - used_margin).
+        The function is defensive (catches exceptions) and logs warnings on failure.
         """
         try:
-            # مطمئن می‌شویم که risk_manager بارگذاری شده و توابع لازم را دارد
-            if (
-                self.risk is not None
-                and hasattr(self.risk, "used_margin_from_positions")
-                and hasattr(self.risk, "get_free_margin")
-            ):
-                leverage = float(
-                    _safe_get(self.cfg, ["env_defaults", "leverage"], 100)
-                )
-                used = self.risk.used_margin_from_positions(self.positions, leverage)
-                free = self.risk.get_free_margin(self.balance, used)
-                return float(free)
-        except Exception as e:
-            self.logger.warning(
-                f"RiskManager margin calculation failed, using fallback. Error: {e}"
-            )
+            # 1) If RiskManager class instance with get_free_margin(balance, positions, ...) exists
+            if self.risk is not None and _RISK_MANAGER_IS_CLASS and hasattr(self.risk, "get_free_margin"):
+                try:
+                    # RiskManager.get_free_margin(self, balance, positions, symbol_info_map=None)
+                    return float(self.risk.get_free_margin(self.balance, self.positions, None))
+                except TypeError:
+                    # try alternative signature get_free_margin(balance, used_margin)
+                    try:
+                        used = self.risk.used_margin_from_positions(self.positions, leverage=float(_safe_get(self.cfg, ["env_defaults", "leverage"], 100)))
+                        return float(self.risk.get_free_margin(self.balance, used))
+                    except Exception:
+                        logger.debug("RiskManager.get_free_margin fallback attempt failed.", exc_info=True)
 
-        # --- Fallback: برآورد محافظه‌کارانه بر اساس حجم پوزیشن‌ها ---
-        try:
-            total_volume = sum(p.get("volume", 0.0) for p in self.positions)
-            return float(max(0.0, self.balance - total_volume * 1000.0))
-        except Exception:
-            return float(self.balance)
+            # 2) If risk is a module exposing used_margin_from_positions(...) and get_free_margin(...)
+            if self.risk is not None and not _RISK_MANAGER_IS_CLASS:
+                if hasattr(self.risk, "used_margin_from_positions") and hasattr(self.risk, "get_free_margin"):
+                    try:
+                        leverage = float(_safe_get(self.cfg, ["env_defaults", "leverage"], _safe_get(self.cfg, ["account", "leverage"], 100)))
+                        used = self.risk.used_margin_from_positions(self.positions, leverage=leverage)
+                        return float(self.risk.get_free_margin(self.balance, used))
+                    except Exception:
+                        logger.debug("risk module margin functions raised; will fallback.", exc_info=True)
+
+            # 3) Fallback manual estimate
+            used_margin = 0.0
+            leverage = float(_safe_get(self.cfg, ["env_defaults", "leverage"], _safe_get(self.cfg, ["account", "leverage"], 100)))
+            # get a helper for symbol info if available
+            symbol_info_fn = None
+            if self.risk is not None and hasattr(self.risk, "get_symbol_info"):
+                symbol_info_fn = getattr(self.risk, "get_symbol_info")
+            elif "risk_manager_module" in globals() and hasattr(globals()["risk_manager_module"], "get_symbol_info"):
+                symbol_info_fn = getattr(globals()["risk_manager_module"], "get_symbol_info")
+
+            # a helper to get a reasonable price for a position
+            def _pos_price(p):
+                return float(p.get("entry_price") or p.get("price") or p.get("filled_price") or
+                            self._get_price_for_step(self.timeframes[0], self.current_step + self.n_candles_per_tf - 1) or 0.0)
+
+            for p in (self.positions or []):
+                try:
+                    lot = float(p.get("volume") or p.get("lot") or p.get("lots") or 0.0)
+                    if lot <= 0:
+                        continue
+                    symbol = p.get("symbol") or self.symbol
+                    price = _pos_price(p)
+                    # default contract size
+                    contract = 100000.0
+                    if symbol_info_fn is not None:
+                        try:
+                            info = symbol_info_fn(symbol)
+                            if isinstance(info, dict) and info.get("contract_size") is not None:
+                                contract = float(info.get("contract_size"))
+                        except Exception:
+                            logger.debug("symbol_info_fn failed for %s", symbol, exc_info=True)
+                    # required margin approximation
+                    used_margin += (lot * contract * max(1.0, price)) / max(1.0, leverage)
+                except Exception:
+                    logger.debug("Error estimating used margin for position %s", p, exc_info=True)
+                    continue
+
+            free = max(0.0, float(self.balance) - float(used_margin))
+            return float(free)
+
+        except Exception as ex:
+            # final fallback: return balance (safe, non-negative)
+            try:
+                logger.warning("Failed to estimate free margin robustly: %s. Returning balance as free margin (fallback).", ex)
+            except Exception:
+                pass
+            return float(max(0.0, getattr(self, "balance", 0.0)))
 
     # ----------------- utilities -----------------
     def get_state_size(self) -> int:
