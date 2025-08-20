@@ -679,54 +679,35 @@ class TradingEnv(gym.Env):
             return True
         return False
 
-    def _estimate_free_margin_old(self) -> float:
-        # best-effort: try risk manager module/class for accurate calc
-        try:
-            if self.risk is None:
-                return 0.0
-            if _RISK_MANAGER_IS_CLASS and hasattr(self.risk, "get_free_margin"):
-                return float(self.risk.get_free_margin(balance=self.balance, equity=self.equity))
-            elif not _RISK_MANAGER_IS_CLASS and hasattr(self.risk, "get_free_margin"):
-                return float(self.risk.get_free_margin(self.balance, self.equity))
-            # fallback simplistic estimate
-            used_margin = sum(p.get("volume", 0.0) * 1000.0 for p in self.positions)  # placeholder
-            return max(0.0, self.balance - used_margin)
-        except Exception:
-            return 0.0
-
     def _estimate_free_margin(self) -> float:
+        """
+        Estimate free margin using the risk_manager utilities.
+        Falls back to a conservative approximation if risk_manager is not available.
+        """
         try:
-            # اگر risk یک کلاس با متد get_free_margin داره، ازش استفاده کن
-            if self.risk is not None and _RISK_MANAGER_IS_CLASS and hasattr(self.risk, "get_free_margin"):
-                return float(self.risk.get_free_margin(balance=self.balance, equity=self.equity))
+            # مطمئن می‌شویم که risk_manager بارگذاری شده و توابع لازم را دارد
+            if (
+                self.risk is not None
+                and hasattr(self.risk, "used_margin_from_positions")
+                and hasattr(self.risk, "get_free_margin")
+            ):
+                leverage = float(
+                    _safe_get(self.cfg, ["env_defaults", "leverage"], 100)
+                )
+                used = self.risk.used_margin_from_positions(self.positions, leverage)
+                free = self.risk.get_free_margin(self.balance, used)
+                return float(free)
+        except Exception as e:
+            self.logger.warning(
+                f"RiskManager margin calculation failed, using fallback. Error: {e}"
+            )
 
-            # اگر risk ماژولیه و تابع pip_value_per_lot یا _get_symbol_info داره، سعی می‌کنیم مارجین را برآورد کنیم
-            if self.risk is not None and not _RISK_MANAGER_IS_CLASS:
-                # estimate used margin by contract_size / leverage if possible
-                try:
-                    # try to read symbol info helper if exposed
-                    if hasattr(self.risk, "_get_symbol_info"):
-                        info = self.risk._get_symbol_info(self.symbol)
-                        contract = float(info.get("contract_size", 100000.0))
-                    else:
-                        contract = 100000.0
-                    leverage = float(_safe_get(self.cfg, ["env_defaults", "leverage"], _safe_get(self.cfg, ["account", "leverage"], 100)))
-                    used_margin = 0.0
-                    for p in self.positions:
-                        entry = p.get("entry_price", 0.0) or 0.0
-                        vol = float(p.get("volume", 0.0))
-                        # approximate margin = (volume * contract * entry_price) / leverage
-                        used_margin += (vol * contract * entry) / max(1.0, leverage)
-                    free = max(0.0, self.balance - used_margin)
-                    return float(free)
-                except Exception:
-                    pass
-
-            # final fallback: conservative estimate (used margin ~ sum volume * 1000)
-            used_margin = sum(p.get("volume", 0.0) * 1000.0 for p in self.positions)
-            return max(0.0, self.balance - used_margin)
+        # --- Fallback: برآورد محافظه‌کارانه بر اساس حجم پوزیشن‌ها ---
+        try:
+            total_volume = sum(p.get("volume", 0.0) for p in self.positions)
+            return float(max(0.0, self.balance - total_volume * 1000.0))
         except Exception:
-            return 0.0
+            return float(self.balance)
 
     # ----------------- utilities -----------------
     def get_state_size(self) -> int:
