@@ -391,55 +391,102 @@ class TradingEnv(gym.Env):
         obs = np.concatenate([candles, account_info])
         return obs
 
+    def _get_base_timestamp_for_step(self) -> Optional[pd.Timestamp]:
+        """Return the timestamp (end time) of the base TF at current_step.
+        Assumes self.timeframes[0] is the most-granular timeframe.
+        """
+        base_tf = self.timeframes[0]
+        df = self.market_data.get(base_tf, pd.DataFrame())
+        if df is None or df.empty:
+            return None
+        # prefer datetime index, else try 'time' column
+        if isinstance(df.index, pd.DatetimeIndex) and len(df) > 0:
+            pos = self.current_step + self.n_candles_per_tf - 1
+            pos = max(0, min(pos, len(df)-1))
+            return df.index[pos]
+        if 'time' in df.columns:
+            ts = pd.to_datetime(df['time'], errors='coerce')
+            pos = self.current_step + self.n_candles_per_tf - 1
+            pos = max(0, min(pos, len(ts)-1))
+            return ts.iloc[pos]
+        return None
+
     def _slice_window_for_tf(self, tf: str, start: int) -> np.ndarray:
         """
-        Return flattened n_candles_per_tf x 4 (open,high,low,close) array for timeframe tf.
-        Pads top with NaN if insufficient rows.
+        Align window for tf using base timestamp for current step.
+        Returns flattened (n_candles_per_tf x 4) array padded with NaN when needed.
         """
         df = self.market_data.get(tf, pd.DataFrame())
         cols = ['open', 'high', 'low', 'close']
         if df.empty:
-            pad = np.full((self.n_candles_per_tf, 4), np.nan, dtype=float)
-            return pad.flatten()
-        # use iloc slice
-        start_idx = int(start)
-        end_idx = start_idx + self.n_candles_per_tf
-        # clamp
+            return np.full((self.n_candles_per_tf * 4,), np.nan, dtype=float)
+
+        # get base timestamp
+        base_ts = self._get_base_timestamp_for_step()
+        # find the index in this tf which is the last <= base_ts
+        if base_ts is not None:
+            if isinstance(df.index, pd.DatetimeIndex):
+                pos = df.index.get_indexer([base_ts], method='ffill')[0]
+            elif 'time' in df.columns:
+                times = pd.to_datetime(df['time'], errors='coerce')
+                pos = np.searchsorted(times.values, np.datetime64(base_ts), side='right') - 1
+            else:
+                pos = start + self.n_candles_per_tf - 1  # fallback to original index logic
+        else:
+            pos = start + self.n_candles_per_tf - 1
+
+        # now compute window start/end on this tf
+        end_idx = int(max(0, min(pos, len(df)-1)))
+        start_idx = end_idx - self.n_candles_per_tf + 1
         if start_idx < 0:
+            pad_rows = -start_idx
             start_idx = 0
-            end_idx = self.n_candles_per_tf
-        slice_df = df.iloc[start_idx:end_idx]
-        # ensure columns exist and in order
-        available_cols = [c for c in cols if c in slice_df.columns]
+        else:
+            pad_rows = 0
+
+        slice_df = df.iloc[start_idx:end_idx+1]
+        # extract columns in desired order, pad missing columns with NaN
+        available = [c for c in cols if c in slice_df.columns]
         if slice_df.empty:
-            pad = np.full((self.n_candles_per_tf, 4), np.nan, dtype=float)
-            return pad.flatten()
-        vals = slice_df[available_cols].values
-        # if missing some columns, pad those columns
+            vals = np.empty((0,4))
+        else:
+            vals = slice_df[available].values
         if vals.shape[1] < 4:
             mat = np.full((vals.shape[0], 4), np.nan, dtype=float)
-            mat[:, :vals.shape[1]] = vals
+            if vals.size > 0:
+                mat[:, :vals.shape[1]] = vals
             vals = mat
-        # if fewer rows than required, pad top
-        if vals.shape[0] < self.n_candles_per_tf:
-            pad_rows = self.n_candles_per_tf - vals.shape[0]
+        if pad_rows > 0:
             pad = np.full((pad_rows, 4), np.nan, dtype=float)
             vals = np.vstack([pad, vals])
+        # ensure rows == n_candles_per_tf
+        if vals.shape[0] < self.n_candles_per_tf:
+            extra = self.n_candles_per_tf - vals.shape[0]
+            pad2 = np.full((extra,4), np.nan, dtype=float)
+            vals = np.vstack([pad2, vals])
         return vals.flatten()
 
     def _get_price_for_step(self, timeframe: str, idx: int) -> float:
         df = self.market_data.get(timeframe, pd.DataFrame())
         if df.empty:
             return float("nan")
-        # clamp index
-        if idx < 0:
-            idx = 0
-        if idx >= len(df):
-            idx = len(df) - 1
-        row = df.iloc[idx]
+        base_ts = self._get_base_timestamp_for_step()
+        if base_ts is not None:
+            if isinstance(df.index, pd.DatetimeIndex):
+                pos = df.index.get_indexer([base_ts], method='ffill')[0]
+            elif 'time' in df.columns:
+                times = pd.to_datetime(df['time'], errors='coerce')
+                pos = np.searchsorted(times.values, np.datetime64(base_ts), side='right') - 1
+            else:
+                pos = idx
+        else:
+            pos = idx
+        # clamp and return close/open...
+        pos = max(0, min(pos, len(df)-1))
+        row = df.iloc[pos]
         if 'close' in row.index:
             return float(row['close'])
-        for c in ['open', 'high', 'low']:
+        for c in ['open','high','low']:
             if c in row.index:
                 return float(row[c])
         return float("nan")
