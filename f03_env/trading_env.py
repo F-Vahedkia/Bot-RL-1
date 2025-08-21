@@ -61,6 +61,8 @@ except Exception:
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("TradingEnv")
 
+# -------- Adding Divergence -------------------
+from f04_features.indicators import Indicators
 
 # ------------------------------
 # Helper utilities
@@ -367,6 +369,19 @@ class TradingEnv(gym.Env):
         poss = [max(0, L - self.n_candles_per_tf + 1) for L in lengths] if lengths else [0]
         self.max_steps = int(min(poss)) if poss else 0
 
+        # -------- افزودن محاسبه واگرایی‌ها --------
+        try:
+            df = self.data_handler.fetch_for_symbol(self.symbol, self.timeframes)
+            df = Indicators.detect_divergences_extrema(
+                df, indicator_columns=['RSI', 'Stochastic RSI', 'MACD', 'CCI', 'MFI']
+            )
+            # اینجا می‌توانید ستون‌های واگرایی را به self.market_data یا observation اضافه کنید
+            # مثال ساده (می‌توانید طبق ساختار observation خودتان تغییر دهید):
+            self.divergences = df[[col for col in df.columns if 'divergence' in col.lower()]]
+        except Exception as ex:
+            logger.exception("reset: failed computing divergences: %s", ex)
+            self.divergences = pd.DataFrame()
+
         obs = self._get_state()
         return obs, {}
 
@@ -385,6 +400,18 @@ class TradingEnv(gym.Env):
 
         # advance time
         self.current_step += 1
+
+        # -------- به‌روزرسانی داده‌های واگرایی --------
+        try:
+            df = self.data_handler.fetch_for_symbol(self.symbol, self.timeframes)
+            df = Indicators.detect_divergences_extrema(
+                df, indicator_columns=['RSI', 'Stochastic RSI', 'MACD', 'CCI', 'MFI']
+            )
+            # اینجا می‌توانید ستون‌های واگرایی را به فضای observation اضافه کنید
+            self.divergences = df[[col for col in df.columns if 'divergence' in col.lower()]]
+        except Exception as ex:
+            logger.exception("step: failed computing divergences: %s", ex)
+            self.divergences = pd.DataFrame()
 
         # compute new state and reward
         state = self._get_state()
