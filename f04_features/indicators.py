@@ -14,8 +14,8 @@ Expected input format
 ---------------------
 OHLCV DataFrame with required columns:
     ['open', 'high', 'low', 'close']
-Optional column:
-    'volume'  (needed for OBV, MFI)
+Optional volume columns supported (in order of preference):
+    'volume' (preferred), 'tick_volume' (MT5), 'tickvolume'
 Index can be DatetimeIndex or RangeIndex. Rows must be in chronological order.
 
 Public API (stable)
@@ -43,13 +43,36 @@ logger = logging.getLogger(__name__)
 # Utilities
 # ---------------------------------------------------------------------------
 
+def _detect_columns(df: pd.DataFrame) -> Dict[str, str]:
+    """Return a mapping of lowercase column name -> actual column name.
+
+    Useful to support different column naming (e.g. 'tick_volume' from MT5).
+    """
+    return {c.lower(): c for c in df.columns}
+
+
 def _validate_ohlc(df: pd.DataFrame, need_volume: bool = False) -> None:
+    cols = _detect_columns(df)
     required = {"open", "high", "low", "close"}
-    missing = required - set(df.columns.str.lower())
+    missing = required - set(cols.keys())
     if missing:
         raise ValueError(f"DataFrame is missing required OHLC columns: {missing}")
-    if need_volume and "volume" not in df.columns:
-        raise ValueError("Volume-based indicator requested, but 'volume' column is missing.")
+
+    if need_volume:
+        # Accept 'volume' or MT5's 'tick_volume' (or common variants)
+        if "volume" in cols:
+            return
+        # try MT5 style column names and create an alias 'volume' for convenience
+        for candidate in ("tick_volume", "tickvolume", "volume_traded"):
+            if candidate in cols:
+                # create a normalized 'volume' column if not present
+                df["volume"] = df[cols[candidate]]
+                logger.debug("Created 'volume' alias from %s", cols[candidate])
+                return
+        raise ValueError(
+            "Volume-based indicator requested, but no volume column found. "
+            "Expected one of: 'volume', 'tick_volume'."
+        )
 
 
 def _sma(s: pd.Series, period: int) -> pd.Series:
@@ -259,8 +282,9 @@ class Indicators:
         _validate_ohlc(df, need_volume=True)
         close = df["close"].astype(float)
         vol = df["volume"].astype(float)
-        sign = np.sign(close.diff().fillna(0.0))
-        df["obv"] = (sign * vol).fillna(0.0).cumsum()
+        # OBV increases by volume when price rises, decreases when price falls
+        direction = np.sign(close.diff().fillna(0.0))
+        df["obv"] = (direction * vol).fillna(0.0).cumsum()
         return df
 
     @staticmethod
@@ -318,6 +342,7 @@ class Indicators:
         df[f"cci_{period}"] = cci
         return df
 
+
 # ---------------------------------------------------------------------------
 # Pipeline for batch computation
 # ---------------------------------------------------------------------------
@@ -326,6 +351,7 @@ class Indicators:
 class IndicatorSpec:
     name: str
     params: Dict[str, float | int | str] = field(default_factory=dict)
+
 
 @dataclass
 class FeaturePipeline:
@@ -363,6 +389,7 @@ class FeaturePipeline:
             except TypeError as e:
                 raise TypeError(f"Invalid params for indicator '{spec.name}': {spec.params}") from e
         return out
+
 
 # ---------------------------------------------------------------------------
 # Sensible default bundle matching user's requested list
@@ -405,6 +432,7 @@ def default_specs(include_supertrend: bool = False, include_volume: bool = True)
 
     return specs
 
+
 # ---------------------------------------------------------------------------
 # Convenience function
 # ---------------------------------------------------------------------------
@@ -419,11 +447,12 @@ def build_features(
 
     - If `specs` is provided, it takes precedence.
     - If `specs` is None, uses `default_specs()` with toggles.
-    - `include_volume=None` auto-detects based on 'volume' column presence.
+    - `include_volume=None` auto-detects based on 'volume' or 'tick_volume' column presence.
     """
     if specs is None:
         if include_volume is None:
-            include_volume = "volume" in df.columns
+            cols = _detect_columns(df)
+            include_volume = any(k in cols for k in ("volume", "tick_volume", "tickvolume"))
         specs = default_specs(include_supertrend=include_supertrend, include_volume=include_volume)
     pipeline = FeaturePipeline(list(specs))
     return pipeline.apply(df)
