@@ -348,19 +348,20 @@ class Indicators:
     # ----------------------
 
     @staticmethod
-    def detect_divergences_extrema(df: pd.DataFrame, indicator_columns: list, price_col: str = "close", order: int = 5):
+    def detect_divergences_extrema(df: pd.DataFrame, indicator_columns: list, price_col: str = "close", order: int = 5, min_diff_ratio: float = 0.001):
         """
-        Detect bullish and bearish divergences using local extrema (argrelextrema) for higher accuracy.
+        Detect bullish and bearish divergences using local extrema with price & indicator validation.
 
         Parameters:
         - df: DataFrame containing price and indicator data.
         - indicator_columns: List of indicator column names to check for divergence.
         - price_col: Column name of the price (default 'close').
-        - order: Number of points to use for comparing local maxima/minima (default 5).
+        - order: Number of points to use for local extrema (default 5).
+        - min_diff_ratio: Minimum relative difference to validate divergence (default 0.1%).
 
         Returns:
         - df: DataFrame with new boolean columns for divergences:
-            - 'RSI_bullish_divergence', 'RSI_bearish_divergence', ...
+            - 'RSI_bullish_divergence', 'RSI_bearish_divergence', etc.
         """
         for ind in indicator_columns:
             bull_col = f"{ind}_bullish_divergence"
@@ -382,7 +383,12 @@ class Indicators:
                 if len(closest_ind_min) == 0:
                     continue
                 ii = closest_ind_min[-1]
-                if df[price_col].iloc[pi] < df[price_col].iloc[ii] and df[ind].iloc[pi] > df[ind].iloc[ii]:
+
+                # بررسی تغییر واقعی قیمت و اندیکاتور
+                price_diff_ratio = (df[price_col].iloc[ii] - df[price_col].iloc[pi]) / df[price_col].iloc[ii]
+                ind_diff_ratio = (df[ind].iloc[pi] - df[ind].iloc[ii]) / df[ind].iloc[ii]
+
+                if price_diff_ratio > 0 and ind_diff_ratio > min_diff_ratio:
                     df.at[pi, bull_col] = True
 
             # واگرایی نزولی: سقف قیمت بالاتر، سقف اندیکاتور پایین‌تر
@@ -391,7 +397,11 @@ class Indicators:
                 if len(closest_ind_max) == 0:
                     continue
                 ii = closest_ind_max[-1]
-                if df[price_col].iloc[pi] > df[price_col].iloc[ii] and df[ind].iloc[pi] < df[ind].iloc[ii]:
+
+                price_diff_ratio = (df[price_col].iloc[pi] - df[price_col].iloc[ii]) / df[price_col].iloc[ii]
+                ind_diff_ratio = (df[ind].iloc[ii] - df[ind].iloc[pi]) / df[ind].iloc[ii]
+
+                if price_diff_ratio > 0 and ind_diff_ratio > min_diff_ratio:
                     df.at[pi, bear_col] = True
 
         return df
