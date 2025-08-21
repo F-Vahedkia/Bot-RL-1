@@ -63,6 +63,7 @@ except Exception:
 
 # -------- Adding Divergence -------------------
 from f04_features.indicators import Indicators
+from f04_features.support_resistance import SupportResistanceMultiTF
 
 # ------------------------------
 # Helper utilities
@@ -331,6 +332,14 @@ class TradingEnv(gym.Env):
         self.done = False
         self._last_equity = self.equity
 
+        # ----- for support_resistanceMultiTF -----
+        self.sr_module = SupportResistanceMultiTF(
+            lookback=5,
+            cluster_method="kmeans",
+            n_clusters=5,
+            prominence=0.001
+        )
+
     # ---------------- Gym API ----------------
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         if seed is not None:
@@ -389,42 +398,49 @@ class TradingEnv(gym.Env):
         if self.done:
             raise RuntimeError("step() called after done=True; call reset()")
 
-        # apply action
+        # -----------------------------
+        # ۱. اعمال اکشن
+        # -----------------------------
         self._apply_action(action)
 
-        # determine current price (use most granular timeframe first in list)
-        price = self._get_price_for_step(self.timeframes[0], self.current_step + self.n_candles_per_tf - 1)
+        # -----------------------------
+        # ۲. تعیین قیمت فعلی (استفاده از تایم‌فریم دقیق‌ترین)
+        # -----------------------------
+        price = self._get_price_for_step(
+            self.timeframes[0], self.current_step + self.n_candles_per_tf - 1
+        )
 
-        # update positions: check sl/tp/trailing/riskfree and compute realized pnl
+        # -----------------------------
+        # ۳. به‌روزرسانی پوزیشن‌ها و محاسبه PnL واقعی
+        # -----------------------------
         self._update_positions(price)
 
-        # advance time
+        # -----------------------------
+        # ۴. پیشروی گام زمانی
+        # -----------------------------
         self.current_step += 1
 
-        # -------- به‌روزرسانی داده‌های واگرایی --------
-        try:
-            df = self.data_handler.fetch_for_symbol(self.symbol, self.timeframes)
-            df = Indicators.detect_divergences_extrema(
-                df, indicator_columns=['RSI', 'Stochastic RSI', 'MACD', 'CCI', 'MFI']
-            )
-            # اینجا می‌توانید ستون‌های واگرایی را به فضای observation اضافه کنید
-            self.divergences = df[[col for col in df.columns if 'divergence' in col.lower()]]
-        except Exception as ex:
-            logger.exception("step: failed computing divergences: %s", ex)
-            self.divergences = pd.DataFrame()
-
-        # compute new state and reward
+        # -----------------------------
+        # ۵. محاسبه state و reward با استفاده از _get_state() اصلاح شده
+        # -----------------------------
         state = self._get_state()
         reward = self._calculate_reward()
         self._last_equity = self.equity
         self.done = self._check_done()
 
+        # -----------------------------
+        # ۶. اطلاعات اضافی
+        # -----------------------------
         info = {
             "balance": self.balance,
             "equity": self.equity,
             "positions": self.positions,
             "current_step": self.current_step,
         }
+
+        # -----------------------------
+        # ۷. بازگشت مقادیر
+        # -----------------------------
         return state, float(reward), bool(self.done), False, info
 
     def render(self, mode: str = "human"):
@@ -444,37 +460,130 @@ class TradingEnv(gym.Env):
             pass
 
     # ---------------- internal helpers ----------------
+    def _get_state_old(self) -> Dict[str, Any]:
+        """
+        محاسبه وضعیت فعلی محیط (state) برای عامل RL
+        شامل داده‌های پوزیشن‌ها، بالانس، اندیکاتورها و واگرایی‌ها
+        """
+
+        # -----------------------------
+        # ۱. ساختار پایه state
+        # -----------------------------
+        state = {
+            "balance": self.balance,
+            "equity": self.equity,
+            "positions": self.positions.copy(),   # کپی تا از تغییر ناخواسته جلوگیری بشه
+            "current_step": self.current_step,
+        }
+
+        # -----------------------------
+        # ۲. داده‌های اصلی قیمت‌ها و اندیکاتورها
+        # -----------------------------
+        try:
+            df = self.data_handler.fetch_for_symbol(self.symbol, self.timeframes)
+        except Exception as e:
+            raise RuntimeError(f"خطا در دریافت داده برای {self.symbol}: {e}")
+
+        # اگر دیتافریم خالی بود
+        if df is None or df.empty:
+            return state
+
+        # -----------------------------
+        # ۳. محاسبه واگرایی‌ها
+        # -----------------------------
+        try:
+            df = Indicators.detect_divergences_extrema(
+                df,
+                indicator_columns=["RSI", "Stochastic RSI", "MACD", "CCI", "MFI"]
+            )
+        except Exception as e:
+            raise RuntimeError(f"خطا در محاسبه واگرایی‌ها: {e}")
+
+        # آخرین ردیف (جدیدترین کندل) برای استخراج فیچرها
+        latest = df.iloc[-1].to_dict()
+
+        # -----------------------------
+        # ۴. افزودن فیچرها به state
+        # -----------------------------
+        for col, val in latest.items():
+            state[col] = float(val) if pd.notnull(val) else 0.0
+
+        # --- اضافه کردن سطوح حمایت/مقاومت Multi-Timeframe ---
+        if hasattr(self, "sr_module") and hasattr(self.data_handler, "fetch_for_symbol"):
+            # داده‌های چند تایم‌فریم را بگیریم
+            df_dict = self.data_handler.fetch_for_symbol(self.symbol, self.timeframes)
+            sr_dict, combined_levels = self.sr_module.get_levels_multitf(df_dict)
+
+            # برای ساده‌سازی، فقط سطوح تلفیقی را به state اضافه می‌کنیم
+            state.extend(combined_levels)
+
+            # در صورت نیاز می‌توان سطوح هر تایم‌فریم را هم اضافه کرد
+            # برای tf, vals in sr_dict.items():
+            #     state.extend(vals['levels'])
+
+        return np.array(state, dtype=np.float32)
+
     def _get_state(self) -> np.ndarray:
         """
-        Build observation vector:
-          - candles (OHLCV history)
-          - account info
-          - time features
+        محاسبه وضعیت فعلی محیط (state) برای عامل RL
+        شامل داده‌های پوزیشن‌ها، بالانس، اندیکاتورها، واگرایی‌ها و سطوح حمایت/مقاومت Multi-Timeframe
         """
-        # --- candles ---
-        candles = self.data_handler.get_candles(self.symbol, self.timeframes, self.n_candles_per_tf)
-        candles = candles.flatten().astype(np.float32)
 
-        # --- account info ---
-        total_volume = sum(pos["volume"] for pos in self.positions) if self.positions else 0.0
-        last_dir = self.positions[-1]["type"] if self.positions else 0
-        free_margin = self.balance * 0.1  # simplification
-        account_info = np.array(
-            [self.balance, self.equity, free_margin, total_volume, last_dir], dtype=np.float32
-        )
+        # -----------------------------
+        # ۱. ساختار پایه state
+        # -----------------------------
+        state = {
+            "balance": self.balance,
+            "equity": self.equity,
+            "positions": self.positions.copy(),  # جلوگیری از تغییر ناخواسته
+            "current_step": self.current_step,
+        }
 
-        # --- base vector ---
-        base = np.concatenate([candles, account_info])
+        # -----------------------------
+        # ۲. داده‌های اصلی قیمت‌ها و اندیکاتورها
+        # -----------------------------
+        try:
+            df = self.data_handler.fetch_for_symbol(self.symbol, self.timeframes)
+        except Exception as e:
+            raise RuntimeError(f"خطا در دریافت داده برای {self.symbol}: {e}")
 
-        # --- time features ---
-        ts = self._get_base_timestamp_for_step()
-        tf_dict = {name: 0.0 for name in self.time_feature_names}
-        _add_time_features(tf_dict, ts)
-        tf_vals = np.array([tf_dict[name] for name in self.time_feature_names], dtype=np.float32)
+        if df is None or df.empty:
+            return np.array(list(state.values()), dtype=np.float32)
 
-        # --- final observation ---
-        obs = np.concatenate([base, tf_vals])
-        return obs
+        # -----------------------------
+        # ۳. محاسبه واگرایی‌ها
+        # -----------------------------
+        try:
+            df = Indicators.detect_divergences_extrema(
+                df,
+                indicator_columns=["RSI", "Stochastic RSI", "MACD", "CCI", "MFI"]
+            )
+        except Exception as e:
+            raise RuntimeError(f"خطا در محاسبه واگرایی‌ها: {e}")
+
+        latest = df.iloc[-1].to_dict()
+
+        # -----------------------------
+        # ۴. افزودن فیچرهای اندیکاتورها و واگرایی‌ها
+        # -----------------------------
+        for col, val in latest.items():
+            state[col] = float(val) if pd.notnull(val) else 0.0
+
+        # -----------------------------
+        # ۵. افزودن سطوح حمایت/مقاومت Multi-Timeframe
+        # -----------------------------
+        if hasattr(self, "sr_module") and hasattr(self.data_handler, "fetch_for_symbol"):
+            df_dict = self.data_handler.fetch_for_symbol(self.symbol, self.timeframes)
+            sr_dict, combined_levels = self.sr_module.get_levels_multitf(df_dict)
+
+            # اضافه کردن سطوح تلفیقی به state با کلیدهای sr_0, sr_1, ...
+            for i, level in enumerate(combined_levels):
+                state[f"sr_{i}"] = float(level)
+
+        # -----------------------------
+        # ۶. تبدیل نهایی به numpy array
+        # -----------------------------
+        return np.array(list(state.values()), dtype=np.float32)
 
     def _get_base_timestamp_for_step(self) -> Optional[pd.Timestamp]:
         """Return the timestamp (end time) of the base TF at current_step.
