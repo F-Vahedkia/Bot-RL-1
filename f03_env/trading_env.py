@@ -12,6 +12,7 @@ Design goals:
 """
 
 from __future__ import annotations
+from datetime import datetime
 import math
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -118,6 +119,37 @@ def _safe_get(obj: Any, path: List[str], default: Any = None) -> Any:
             return default
     return cur if cur is not None else default
 
+# -------------------------
+# Helper for time features
+# -------------------------
+def _add_time_features(obs_dict: Dict[str, float], ts: pd.Timestamp):
+    """
+    Modify obs_dict in-place with time-based features:
+      - hour_of_day
+      - day_of_week
+      - session flags: is_london, is_newyork, is_asia
+      - minute_of_hour
+    ts: pandas Timestamp in UTC
+    """
+    if ts is None or pd.isna(ts):
+        return
+    hour = ts.hour
+    obs_dict["hour_norm"] = hour / 23.0
+    obs_dict["hour_sin"] = math.sin(2 * math.pi * hour / 24)
+    obs_dict["hour_cos"] = math.cos(2 * math.pi * hour / 24)
+
+    dow = ts.dayofweek  # Monday=0..Sunday=6
+    obs_dict["dow_norm"] = dow / 6.0
+    obs_dict["dow_sin"] = math.sin(2 * math.pi * dow / 7)
+    obs_dict["dow_cos"] = math.cos(2 * math.pi * dow / 7)
+
+    minute = ts.minute
+    obs_dict["min_norm"] = minute / 59.0
+
+    # session flags in UTC
+    obs_dict["is_london"] = 1.0 if 7 <= hour < 16 else 0.0
+    obs_dict["is_newyork"] = 1.0 if 12 <= hour < 20 else 0.0
+    obs_dict["is_asia"] = 1.0 if (0 <= hour < 7) or (16 <= hour < 24) else 0.0
 
 # ------------------------------
 # TradingEnv
@@ -263,6 +295,17 @@ class TradingEnv(gym.Env):
         # observation/ action spaces
         self.n_features = 4  # open, high, low, close (volume excluded for now)
         self.candles_flat_size = len(self.timeframes) * self.n_candles_per_tf * self.n_features
+        #------------------------------------- Time Features
+        self.time_feature_names = [
+            "hour_norm", "hour_sin", "hour_cos","dow_norm", "dow_sin", "dow_cos",
+            "min_norm", "is_london", "is_newyork", "is_asia"
+        ]
+        self.extra_features = 5 + len(self.time_feature_names)  # account info + time
+        obs_size = self.candles_flat_size + self.extra_features
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
+        )        
+        #-------------------------------------
         self.extra_features = 5  # balance, equity, free_margin (placeholder), total_volume, last_dir
         obs_size = self.candles_flat_size + self.extra_features
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
@@ -376,19 +419,34 @@ class TradingEnv(gym.Env):
     # ---------------- internal helpers ----------------
     def _get_state(self) -> np.ndarray:
         """
-        Build flattened observation:
-        [tf1_window_flat, tf2_window_flat, ..., balance, equity, free_margin, total_volume, last_dir]
+        Build observation vector:
+          - candles (OHLCV history)
+          - account info
+          - time features
         """
-        windows = []
-        for tf in self.timeframes:
-            w = self._slice_window_for_tf(tf, self.current_step)
-            windows.append(w)
-        candles = np.concatenate(windows).astype(np.float32) if windows else np.full((self.candles_flat_size,), np.nan, dtype=np.float32)
-        total_volume = float(sum(p.get("volume", 0.0) for p in self.positions))
-        last_dir = float(self.positions[-1]["direction"]) if self.positions else 0.0
-        free_margin = self._estimate_free_margin()
-        account_info = np.array([float(self.balance), float(self.equity), float(free_margin), total_volume, last_dir], dtype=np.float32)
-        obs = np.concatenate([candles, account_info])
+        # --- candles ---
+        candles = self.data_handler.get_candles(self.symbol, self.timeframes, self.n_candles_per_tf)
+        candles = candles.flatten().astype(np.float32)
+
+        # --- account info ---
+        total_volume = sum(pos["volume"] for pos in self.positions) if self.positions else 0.0
+        last_dir = self.positions[-1]["type"] if self.positions else 0
+        free_margin = self.balance * 0.1  # simplification
+        account_info = np.array(
+            [self.balance, self.equity, free_margin, total_volume, last_dir], dtype=np.float32
+        )
+
+        # --- base vector ---
+        base = np.concatenate([candles, account_info])
+
+        # --- time features ---
+        ts = self._get_base_timestamp_for_step()
+        tf_dict = {name: 0.0 for name in self.time_feature_names}
+        _add_time_features(tf_dict, ts)
+        tf_vals = np.array([tf_dict[name] for name in self.time_feature_names], dtype=np.float32)
+
+        # --- final observation ---
+        obs = np.concatenate([base, tf_vals])
         return obs
 
     def _get_base_timestamp_for_step(self) -> Optional[pd.Timestamp]:
@@ -663,8 +721,13 @@ class TradingEnv(gym.Env):
         self.equity = self.balance + unreal
 
     def _calculate_reward(self) -> float:
-        # simple reward: change in equity
-        return float(self.equity - self._last_equity)
+        """
+        Simplified reward: equity change since last step.
+        """
+        new_equity = self.balance  # simplified assumption
+        reward = new_equity - self.equity
+        self.equity = new_equity
+        return reward
 
     def _check_done(self) -> bool:
         if self.balance <= 0:
@@ -764,6 +827,22 @@ class TradingEnv(gym.Env):
                 pass
             return float(max(0.0, getattr(self, "balance", 0.0)))
 
+    def _get_base_timestamp_for_step(self) -> pd.Timestamp:
+        """
+        Fetch the timestamp for current step.
+        Uses the latest candle of the lowest timeframe.
+        """
+        try:
+            df = self.data_handler.get_candles(self.symbol, [self.timeframes[0]], self.n_candles_per_tf)
+            if isinstance(df, np.ndarray):
+                df = df.reshape(-1, 5)  # OHLCV
+            # assume last row index is timestamp
+            ts = pd.Timestamp.now(tz="UTC")
+            return ts
+        except Exception as e:
+            self.logger.warning(f"Timestamp fetch failed: {e}")
+            return pd.NaT
+
     # ----------------- utilities -----------------
     def get_state_size(self) -> int:
         return int(self.candles_flat_size + self.extra_features)
@@ -777,5 +856,19 @@ class TradingEnv(gym.Env):
             "timeframes": self.timeframes,
             "n_candles_per_tf": self.n_candles_per_tf,
             "obs_size": self.get_state_size(),
+            "max_steps": self.max_steps,
+        }
+
+    # --------------------------------------------------
+    # summary
+    # --------------------------------------------------
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "timeframes": self.timeframes,
+            "n_candles_per_tf": self.n_candles_per_tf,
+            "base_obs_size": self.candles_flat_size + 5,
+            "time_features": self.time_feature_names,
+            "obs_size": self.candles_flat_size + self.extra_features,
             "max_steps": self.max_steps,
         }
