@@ -342,6 +342,44 @@ class Indicators:
         df[f"cci_{period}"] = cci
         return df
 
+    # ----------------------
+    # جدید: بخش تشخیص واگرایی‌ها
+    # ----------------------
+
+    @staticmethod
+    def detect_divergences(df: pd.DataFrame, indicator_columns: list, price_col: str = "close", threshold: float = 0.01) -> pd.DataFrame:
+        """
+        Detect bullish and bearish divergences for selected indicators.
+
+        Parameters:
+        - df: DataFrame containing price and indicator data.
+        - indicator_columns: List of indicator column names to check for divergence.
+        - price_col: Column name of the price (default 'close').
+        - threshold: Minimum relative change to detect divergence (default 1%).
+
+        Returns:
+        - df: DataFrame with new boolean columns for divergences:
+            - 'RSI_bullish_divergence', 'RSI_bearish_divergence', ...
+        """
+        for ind in indicator_columns:
+            bull_col = f"{ind}_bullish_divergence"
+            bear_col = f"{ind}_bearish_divergence"
+
+            df[bull_col] = False
+            df[bear_col] = False
+
+            # محاسبه تغییر درصدی برای قیمت و اندیکاتور
+            price_pct = df[price_col].pct_change()
+            ind_pct = df[ind].pct_change()
+
+            # تشخیص واگرایی
+            for i in range(1, len(df)):
+                if price_pct.iloc[i] < -threshold and ind_pct.iloc[i] > threshold:
+                    df.at[i, bull_col] = True
+                elif price_pct.iloc[i] > threshold and ind_pct.iloc[i] < -threshold:
+                    df.at[i, bear_col] = True
+
+        return df
 
 # ---------------------------------------------------------------------------
 # Pipeline for batch computation
