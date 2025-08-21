@@ -36,6 +36,7 @@ from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
+from scipy.signal import argrelextrema
 
 logger = logging.getLogger(__name__)
 
@@ -347,15 +348,15 @@ class Indicators:
     # ----------------------
 
     @staticmethod
-    def detect_divergences(df: pd.DataFrame, indicator_columns: list, price_col: str = "close", threshold: float = 0.01) -> pd.DataFrame:
+    def detect_divergences_extrema(df: pd.DataFrame, indicator_columns: list, price_col: str = "close", order: int = 5):
         """
-        Detect bullish and bearish divergences for selected indicators.
+        Detect bullish and bearish divergences using local extrema (argrelextrema) for higher accuracy.
 
         Parameters:
         - df: DataFrame containing price and indicator data.
         - indicator_columns: List of indicator column names to check for divergence.
         - price_col: Column name of the price (default 'close').
-        - threshold: Minimum relative change to detect divergence (default 1%).
+        - order: Number of points to use for comparing local maxima/minima (default 5).
 
         Returns:
         - df: DataFrame with new boolean columns for divergences:
@@ -368,16 +369,30 @@ class Indicators:
             df[bull_col] = False
             df[bear_col] = False
 
-            # محاسبه تغییر درصدی برای قیمت و اندیکاتور
-            price_pct = df[price_col].pct_change()
-            ind_pct = df[ind].pct_change()
+            # شناسایی نقاط کف و سقف برای قیمت و اندیکاتور
+            price_min_idx = argrelextrema(df[price_col].values, np.less, order=order)[0]
+            price_max_idx = argrelextrema(df[price_col].values, np.greater, order=order)[0]
 
-            # تشخیص واگرایی
-            for i in range(1, len(df)):
-                if price_pct.iloc[i] < -threshold and ind_pct.iloc[i] > threshold:
-                    df.at[i, bull_col] = True
-                elif price_pct.iloc[i] > threshold and ind_pct.iloc[i] < -threshold:
-                    df.at[i, bear_col] = True
+            ind_min_idx = argrelextrema(df[ind].values, np.less, order=order)[0]
+            ind_max_idx = argrelextrema(df[ind].values, np.greater, order=order)[0]
+
+            # واگرایی صعودی: کف قیمت پایین‌تر، کف اندیکاتور بالاتر
+            for pi in price_min_idx:
+                closest_ind_min = ind_min_idx[ind_min_idx <= pi]
+                if len(closest_ind_min) == 0:
+                    continue
+                ii = closest_ind_min[-1]
+                if df[price_col].iloc[pi] < df[price_col].iloc[ii] and df[ind].iloc[pi] > df[ind].iloc[ii]:
+                    df.at[pi, bull_col] = True
+
+            # واگرایی نزولی: سقف قیمت بالاتر، سقف اندیکاتور پایین‌تر
+            for pi in price_max_idx:
+                closest_ind_max = ind_max_idx[ind_max_idx <= pi]
+                if len(closest_ind_max) == 0:
+                    continue
+                ii = closest_ind_max[-1]
+                if df[price_col].iloc[pi] > df[price_col].iloc[ii] and df[ind].iloc[pi] < df[ind].iloc[ii]:
+                    df.at[pi, bear_col] = True
 
         return df
 
