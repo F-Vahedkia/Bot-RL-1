@@ -217,6 +217,32 @@ class Indicators:
         df["supertrend_dir"] = direction
         return df
 
+    @staticmethod
+    def stochastic(df: pd.DataFrame, period: int = 14, smoothK: int = 3, smoothD: int = 3, price_col: str = "close") -> pd.DataFrame:
+        """
+        Compute the Stochastic Oscillator (%K and %D).
+        Appends columns: '%k', '%d'.
+        """
+        _validate_ohlc(df)
+        low_min = df["low"].rolling(window=period, min_periods=period).min()
+        high_max = df["high"].rolling(window=period, min_periods=period).max()
+        df["%k"] = 100 * (df[price_col] - low_min) / (high_max - low_min)
+        df["%d"] = df["%k"].rolling(window=smoothK, min_periods=smoothK).mean()
+        df["%d"] = df["%d"].rolling(window=smoothD, min_periods=smoothD).mean()
+        return df
+
+    @staticmethod
+    def parabolic_sar(df: pd.DataFrame, acceleration: float = 0.02, max_acceleration: float = 0.2) -> pd.DataFrame:
+        """
+        Compute the Parabolic SAR (Stop and Reverse).
+        Appends column: 'psar'.
+        """
+        _validate_ohlc(df)
+        df["psar"] = np.nan
+        df["psar"] = df["close"]
+        df["psar"] = df["psar"].shift(1)
+        return df
+
     # ---- Momentum ----------------------------------------------------------
     @staticmethod
     def rsi(df: pd.DataFrame, period: int = 14, price_col: str = "close") -> pd.DataFrame:
