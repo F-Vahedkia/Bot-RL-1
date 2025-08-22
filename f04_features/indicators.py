@@ -91,6 +91,114 @@ def _rma(s: pd.Series, period: int) -> pd.Series:
     return s.ewm(alpha=alpha, adjust=False, min_periods=period).mean()
 
 
+#---- َadded for 4 new indicators ---------------------
+# ---- Volume/Flow & Patterns -------------------------------------------
+@staticmethod
+def adl(df: pd.DataFrame) -> pd.DataFrame:
+    """Accumulation / Distribution Line (Chaikin ADL)."""
+    _validate_ohlc(df, need_volume=True)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+    vol = df["volume"].astype(float)
+
+    # Money Flow Multiplier = (2*close - high - low) / (high - low)
+    denom = (high - low).replace(0.0, np.nan)
+    mfm = ((2.0 * close - high - low) / denom).fillna(0.0)
+    mfv = mfm * vol
+    df["adl"] = mfv.cumsum().fillna(method="ffill").fillna(0.0)
+    return df
+
+@staticmethod
+def cmf(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
+    """Chaikin Money Flow (CMF)."""
+    _validate_ohlc(df, need_volume=True)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+    vol = df["volume"].astype(float)
+
+    denom = (high - low).replace(0.0, np.nan)
+    mfm = ((2.0 * close - high - low) / denom).fillna(0.0)
+    mfv = mfm * vol
+
+    sum_mfv = mfv.rolling(window=period, min_periods=period).sum()
+    sum_vol = vol.rolling(window=period, min_periods=period).sum().replace(0.0, np.nan)
+    cmf = sum_mfv / sum_vol
+    df[f"cmf_{period}"] = cmf.fillna(0.0)
+    return df
+
+@staticmethod
+def chaikin_oscillator(df: pd.DataFrame, fast: int = 3, slow: int = 10) -> pd.DataFrame:
+    """Chaikin Oscillator = EMA_fast(ADL) - EMA_slow(ADL)."""
+    # Ensure ADL exists
+    if "adl" not in df.columns:
+        df = Indicators.adl(df)
+    adl_series = df["adl"].astype(float)
+    fast_ema = _ema(adl_series, fast)
+    slow_ema = _ema(adl_series, slow)
+    df[f"chaikin_osc_{fast}_{slow}"] = (fast_ema - slow_ema)
+    return df
+
+@staticmethod
+def candlestick_patterns(df: pd.DataFrame, patterns: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Detect simple candlestick patterns and append boolean columns:
+        - doji, hammer, shooting_star, bull_engulf, bear_engulf
+    The detection rules are conservative/simple and parameterizable later.
+    """
+    _validate_ohlc(df)
+    open_ = df["open"].astype(float)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+
+    body = (close - open_).abs()
+    rng = (high - low).replace(0.0, np.nan)
+    upper_shadow = (high - np.maximum(close, open_))
+    lower_shadow = (np.minimum(close, open_) - low)
+
+    # Doji: very small body relative to range
+    df["pattern_doji"] = (body / rng <= 0.1).fillna(False)
+
+    # Hammer (bullish): long lower shadow, small body near top
+    df["pattern_hammer"] = (
+        (lower_shadow >= 2 * body) & (upper_shadow <= 0.5 * body)
+    ).fillna(False)
+
+    # Shooting star (bearish): long upper shadow, small body near bottom
+    df["pattern_shooting_star"] = (
+        (upper_shadow >= 2 * body) & (lower_shadow <= 0.5 * body)
+    ).fillna(False)
+
+    # Engulfing patterns (compare with previous candle)
+    prev_open = open_.shift(1)
+    prev_close = close.shift(1)
+    prev_body = (prev_close - prev_open).abs()
+
+    # Bullish engulfing: previous bearish, current bullish, current body engulfs prev body
+    df["pattern_bull_engulf"] = (
+        (prev_close < prev_open)
+        & (close > open_)
+        & (close > prev_open)
+        & (open_ < prev_close)
+    ).fillna(False)
+
+    # Bearish engulfing: previous bullish, current bearish, current body engulfs prev body
+    df["pattern_bear_engulf"] = (
+        (prev_close > prev_open)
+        & (close < open_)
+        & (open_ > prev_close)
+        & (close < prev_open)
+    ).fillna(False)
+
+    return df
+
+
+
+
+
+
 def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     prev_close = close.shift(1)
     tr = pd.concat([
