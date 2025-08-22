@@ -90,9 +90,19 @@ def _rma(s: pd.Series, period: int) -> pd.Series:
     alpha = 1.0 / float(period)
     return s.ewm(alpha=alpha, adjust=False, min_periods=period).mean()
 
+def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high - low),
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr
 
-#---- َadded for 4 new indicators ---------------------
-# ---- Volume/Flow & Patterns -------------------------------------------
+# ---------------------------------------------------------------------------
+# Volume/Flow & Patterns
+# ---------------------------------------------------------------------------
+
 @staticmethod
 def adl(df: pd.DataFrame) -> pd.DataFrame:
     """Accumulation / Distribution Line (Chaikin ADL)."""
@@ -193,20 +203,6 @@ def candlestick_patterns(df: pd.DataFrame, patterns: Optional[List[str]] = None)
     ).fillna(False)
 
     return df
-
-
-
-
-
-
-def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
-    prev_close = close.shift(1)
-    tr = pd.concat([
-        (high - low),
-        (high - prev_close).abs(),
-        (low - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    return tr
 
 # ---------------------------------------------------------------------------
 # Indicators
