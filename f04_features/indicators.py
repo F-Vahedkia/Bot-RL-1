@@ -32,7 +32,7 @@ coding style (PEP8, type hints). It does NOT alter row ordering.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -533,7 +533,7 @@ class Indicators:
         return df
 
 
-class MovingAverageCross:
+class MovingAverageCross_old:
     """
     A flexible Moving Average Crossover detector.
     Supports both SMA and EMA with arbitrary period pairs.
@@ -595,6 +595,224 @@ class MovingAverageCross:
 
         return df
 
+
+class MovingAverageCross:
+    """
+    Robust & extensible MA crossover detector.
+
+    Usage:
+        mac = MovingAverageCross(fast=12, slow=26, ma_type='ema',
+                                 signal_col='ma_cross_signal',
+                                 min_bars_between_signals=3,
+                                 confirm_bars=1)
+        df = mac.add_to_df(df)   # returns df with fast/slow MA cols and signal column
+        signal = mac.last_signal(df)  # +1 buy, -1 sell, 0 none
+
+    Parameters:
+    - fast, slow: int or List[int] (if lists, multiple pairs will be computed)
+    - ma_type: 'ema' or 'sma'
+    - signal_col: name of final signal column
+    - min_bars_between_signals: suppress repeat signals within this many bars
+    - confirm_bars: require signal direction to hold for `confirm_bars` (>=1) bars to confirm
+    - magnitude: if True returns magnitude of crossover (diff normalized) instead of only -1/0/+1
+    """
+
+    def __init__(
+        self,
+        fast: Union[int, List[int]] = 12,
+        slow: Union[int, List[int]] = 26,
+        ma_type: str = "ema",
+        signal_col: str = "ma_cross_signal",
+        min_bars_between_signals: int = 3,
+        confirm_bars: int = 1,
+        magnitude: bool = False,
+        price_col: str = "close",
+    ):
+        self.fast = [fast] if isinstance(fast, int) else list(fast)
+        self.slow = [slow] if isinstance(slow, int) else list(slow)
+        if len(self.fast) != len(self.slow):
+            # allow broadcasting: if one of lists length 1, broadcast it
+            if len(self.fast) == 1:
+                self.fast = self.fast * len(self.slow)
+            elif len(self.slow) == 1:
+                self.slow = self.slow * len(self.fast)
+            else:
+                raise ValueError("fast and slow must have same length or one must be scalar.")
+        self.ma_type = ma_type.lower()
+        if self.ma_type not in ("ema", "sma"):
+            raise ValueError("ma_type must be 'ema' or 'sma'")
+        self.signal_col = signal_col
+        self.min_bars_between_signals = max(0, int(min_bars_between_signals))
+        self.confirm_bars = max(1, int(confirm_bars))
+        self.magnitude = bool(magnitude)
+        self.price_col = price_col
+
+    # ---------- helpers ----------
+    @staticmethod
+    def _ema(series: pd.Series, span: int) -> pd.Series:
+        return series.ewm(span=span, adjust=False).mean()
+
+    @staticmethod
+    def _sma(series: pd.Series, window: int) -> pd.Series:
+        return series.rolling(window=window, min_periods=1).mean()
+
+    def _compute_ma(self, df: pd.DataFrame, period: int, prefix: str) -> pd.Series:
+        s = df[self.price_col].astype(float)
+        if self.ma_type == "ema":
+            return self._ema(s, period).rename(f"{prefix}_{period}")
+        else:
+            return self._sma(s, period).rename(f"{prefix}_{period}")
+
+    # ---------- core API ----------
+    def add_to_df(self, df: pd.DataFrame, inplace: bool = True) -> pd.DataFrame:
+        """
+        Compute MA columns and crossover signal column and append to df.
+
+        Adds columns:
+          - ma_fast_{p}, ma_slow_{q}  (for each pair)
+          - ma_diff_{i}  (fast - slow)
+          - {signal_col}  (final aggregated signal)
+
+        Signal semantics:
+          +1 : bullish crossover (fast crosses above slow)
+          -1 : bearish crossover
+           0 : no signal
+
+        If magnitude=True, signal column contains signed normalized magnitude instead of +/-1.
+        """
+        working = df if inplace else df.copy()
+
+        # compute each MA pair and diffs
+        diffs = []
+        for idx, (f, s) in enumerate(zip(self.fast, self.slow)):
+            fast_name = f"ma_fast_{f}"
+            slow_name = f"ma_slow_{s}"
+            working[fast_name] = self._compute_ma(working, f, prefix="ma_fast")
+            working[slow_name] = self._compute_ma(working, s, prefix="ma_slow")
+            diff_col = f"ma_diff_{f}_{s}"
+            working[diff_col] = working[fast_name] - working[slow_name]
+            diffs.append(diff_col)
+
+        # aggregate diffs (sum) to form a combined diff measure
+        if len(diffs) == 1:
+            working["_ma_agg_diff"] = working[diffs[0]]
+        else:
+            working["_ma_agg_diff"] = working[diffs].sum(axis=1)
+
+        # raw sign of diff
+        raw_sign = np.sign(working["_ma_agg_diff"]).astype(int)
+
+        # detect cross points: compare sign with previous bar
+        sign_shift = raw_sign.shift(1).fillna(0).astype(int)
+        cross = raw_sign - sign_shift  # +2 means -1 -> +1, +1 means 0->+1, -1 etc.
+
+        # normalize to -1/0/+1 only when crossing happens from opposite sign
+        # true cross occurs where sign differs and change is non-zero
+        signal_series = pd.Series(0, index=working.index, dtype=float)
+
+        for i in range(len(working)):
+            # skip first bars where no previous exists
+            if i == 0:
+                continue
+            prev = sign_shift.iloc[i]
+            curr = raw_sign.iloc[i]
+            if prev == 0 and curr == 0:
+                continue
+            # bullish cross: prev <= 0 and curr > 0
+            if prev <= 0 and curr > 0:
+                signal_series.iat[i] = 1.0
+            # bearish cross: prev >= 0 and curr < 0
+            elif prev >= 0 and curr < 0:
+                signal_series.iat[i] = -1.0
+
+        # optional confirmation: require the direction to hold for confirm_bars
+        if self.confirm_bars and self.confirm_bars > 1:
+            confirmed = signal_series.copy()
+            for idx in range(len(signal_series)):
+                sig = signal_series.iat[idx]
+                if sig == 0:
+                    continue
+                # check next confirm_bars-1 bars maintain same sign of _ma_agg_diff
+                end = min(len(signal_series), idx + self.confirm_bars)
+                window = working["_ma_agg_diff"].iloc[idx:end]
+                if sig > 0:
+                    if not (window > 0).all():
+                        confirmed.iat[idx] = 0.0
+                else:
+                    if not (window < 0).all():
+                        confirmed.iat[idx] = 0.0
+            signal_series = confirmed
+
+        # apply min_bars_between_signals suppression
+        if self.min_bars_between_signals > 0:
+            last_sig_idx = -9999
+            suppressed = signal_series.copy()
+            for idx in range(len(signal_series)):
+                if signal_series.iat[idx] != 0:
+                    if idx - last_sig_idx <= self.min_bars_between_signals:
+                        suppressed.iat[idx] = 0.0
+                    else:
+                        last_sig_idx = idx
+            signal_series = suppressed
+
+        # if magnitude requested, scale by normalized diff
+        if self.magnitude:
+            # normalize by rolling std to prevent huge values
+            denom = working["_ma_agg_diff"].rolling(window=max(5, max(self.fast + self.slow))).std().replace(0, np.nan)
+            norm = (working["_ma_agg_diff"] / denom).fillna(0.0)
+            signal_series = signal_series * norm
+
+        # write columns to df
+        working[self.signal_col] = signal_series.astype(float)
+        # cleanup internal agg column if desired (keep for debugging)
+        # working.drop(columns=["_ma_agg_diff"], inplace=True)  # optional
+
+        return working
+
+    def last_signal(self, df: pd.DataFrame) -> float:
+        """Return last signal value (float)."""
+        if self.signal_col not in df.columns:
+            df = self.add_to_df(df, inplace=False)
+        val = float(df[self.signal_col].iloc[-1])
+        if np.isnan(val):
+            return 0.0
+        return val
+
+    def cross_points(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Return DataFrame of cross points (index, signal, fast, slow, diff).
+        Useful for analysis/backtesting.
+        """
+        if self.signal_col not in df.columns:
+            df = self.add_to_df(df, inplace=False)
+        points = df[df[self.signal_col] != 0][[self.signal_col]]
+        # augment with fast/slow pair values and diff
+        for f, s in zip(self.fast, self.slow):
+            points[f"ma_fast_{f}"] = df[f"ma_fast_{f}"]
+            points[f"ma_slow_{s}"] = df[f"ma_slow_{s}"]
+        points["_ma_agg_diff"] = df["_ma_agg_diff"]
+        return points
+
+    # optional convenience: produce boolean buy/sell columns
+    def as_binary_cols(self, df: pd.DataFrame, buy_col: str = "ma_buy", sell_col: str = "ma_sell"):
+        if self.signal_col not in df.columns:
+            df = self.add_to_df(df, inplace=False)
+        df[buy_col] = (df[self.signal_col] > 0).astype(int)
+        df[sell_col] = (df[self.signal_col] < 0).astype(int)
+        return df
+
+    def to_spec(self) -> Dict[str, Any]:
+        """Return a small dict describing the current config (for logging or saving)."""
+        return {
+            "fast": self.fast,
+            "slow": self.slow,
+            "ma_type": self.ma_type,
+            "signal_col": self.signal_col,
+            "min_bars_between_signals": self.min_bars_between_signals,
+            "confirm_bars": self.confirm_bars,
+            "magnitude": self.magnitude,
+            "price_col": self.price_col,
+        }
 
 # ---------------------------------------------------------------------------
 # Pipeline for batch computation
