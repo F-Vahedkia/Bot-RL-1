@@ -6,6 +6,7 @@ o	requirements.txt  یا Pipfile
 o	Pin  کردن نسخه‌ها برای تکرارپذیری
 2.	ساختار فولدر پیشنهادی
 Bot-RL-1/
+├── f00_Docs/                 # فایل‌های markdown که شامل اسناد پروژه هستند
 ├── f01_config/               # فایل‌های تنظیمات (YAML/JSON)
 ├── f02_data/
 │   ├── raw/                  # داده خام OHLCV, اخبار, فاندامنتال

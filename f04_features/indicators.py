@@ -369,7 +369,7 @@ class Indicators:
         df[f"cci_{period}"] = cci
         return df
 
-    # ---- Divergence --------------------------------------------------------
+    # ---- Divergence ---------------------------------------------------------
     @staticmethod
     def detect_divergences_extrema(df: pd.DataFrame, indicator_columns: list, price_col: str = "close", order: int = 5, min_diff_ratio: float = 0.001):
         """
@@ -429,7 +429,7 @@ class Indicators:
 
         return df
 
-    # ---- Volume-based (حجم/فلو) --------------------------------------------
+    # ---- Volume-based (حجم/فلو) ---------------------------------------------
     @staticmethod
     def adl(df: pd.DataFrame) -> pd.DataFrame:
         """Accumulation / Distribution Line (Chaikin ADL)."""
@@ -531,6 +531,128 @@ class Indicators:
         ).fillna(False)
 
         return df
+
+    # ---- Fibonacci retracement & Extension -----------------------------------
+    @staticmethod
+    def fibonacci_retracement(high: pd.Series, low: pd.Series, lookback: int = 100, 
+                              levels: list = None) -> pd.DataFrame:
+        """
+        محاسبه سطوح فیبوناچی (Retracement) بر اساس آخرین نوسان (Swing High و Swing Low).
+        
+        Parameters
+        ----------
+        high : pd.Series
+            سری داده‌های High (بالاترین قیمت هر کندل).
+        low : pd.Series
+            سری داده‌های Low (پایین‌ترین قیمت هر کندل).
+        lookback : int, default=100
+            تعداد کندل‌های گذشته که برای یافتن Swing High و Swing Low بررسی می‌شود.
+        levels : list, optional
+            لیست سطوح فیبوناچی دلخواه. به طور پیش‌فرض [0.236, 0.382, 0.5, 0.618, 0.786].
+
+        Returns
+        -------
+        pd.DataFrame
+            شامل سطوح فیبوناچی برای آخرین بازه انتخاب‌شده.
+            ستون‌ها: ['Level', 'Price']
+        """
+        
+        # اگر سطوح دلخواه داده نشد، از سطوح استاندارد استفاده می‌کنیم
+        if levels is None:
+            levels = [0.236, 0.382, 0.5, 0.618, 0.786]
+
+        # بررسی داده کافی
+        if len(high) < lookback or len(low) < lookback:
+            raise ValueError("داده‌های کافی برای محاسبه فیبوناچی وجود ندارد.")
+
+        # انتخاب آخرین n کندل
+        recent_high = high[-lookback:].max()
+        recent_low = low[-lookback:].min()
+
+        # تشخیص جهت حرکت (صعودی یا نزولی)
+        uptrend = recent_high > recent_low
+
+        # محاسبه سطوح فیبوناچی
+        fibonacci_levels = []
+        for level in levels:
+            if uptrend:
+                price_level = recent_high - (recent_high - recent_low) * level
+            else:
+                price_level = recent_low + (recent_high - recent_low) * level
+            fibonacci_levels.append((level, price_level))
+
+        # تبدیل خروجی به DataFrame مرتب
+        fib_df = pd.DataFrame(fibonacci_levels, columns=["Level", "Price"])
+        return fib_df
+
+        # مثال استفاده:
+        # fib = Indicators.fibonacci_retracement(df['High'], df['Low'], lookback=120)
+        # print(fib)
+
+    # ---- Fibonacci Levels ----------------------------------------------------
+    @staticmethod
+    def fibonacci_levels(high: pd.Series, low: pd.Series, lookback: int = 100,
+                         levels: list = None, include_extension: bool = True) -> pd.DataFrame:
+        """
+        محاسبه سطوح Fibonacci Retracement و (اختیاری) Extension.
+        
+        Parameters
+        ----------
+        high : pd.Series
+            سری داده‌های High (بالاترین قیمت هر کندل)
+        low : pd.Series
+            سری داده‌های Low (پایین‌ترین قیمت هر کندل)
+        lookback : int
+            تعداد کندل‌های گذشته برای تعیین Swing High/Low
+        levels : list, optional
+            لیست سطوح Fibonacci Retracement، پیش‌فرض [0.236,0.382,0.5,0.618,0.786]
+        include_extension : bool
+            اگر True باشد، سطوح Extension نیز محاسبه می‌شوند (1.272,1.618,2.0)
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame شامل سطوح Fibonacci، نوع (Retracement/Extension) و قیمت
+        """
+        # سطوح پیش‌فرض Retracement
+        if levels is None:
+            levels = [0.236, 0.382, 0.5, 0.618, 0.786]
+
+        # بررسی داده کافی
+        if len(high) < lookback or len(low) < lookback:
+            raise ValueError("داده‌های کافی برای محاسبه فیبوناچی وجود ندارد.")
+
+        # انتخاب آخرین n کندل
+        recent_high = high[-lookback:].max()
+        recent_low = low[-lookback:].min()
+
+        # تعیین جهت روند
+        uptrend = recent_high > recent_low
+
+        fib_list = []
+
+        # محاسبه سطوح Retracement
+        for level in levels:
+            price = recent_high - (recent_high - recent_low) * level if uptrend else recent_low + (recent_high - recent_low) * level
+            fib_list.append({"Type": "Retracement", "Level": level, "Price": price})
+
+        # محاسبه سطوح Extension (اختیاری)
+        if include_extension:
+            ext_levels = [1.272, 1.618, 2.0]
+            for ext in ext_levels:
+                price = recent_high + (recent_high - recent_low) * (ext - 1) if uptrend else recent_low - (recent_high - recent_low) * (ext - 1)
+                fib_list.append({"Type": "Extension", "Level": ext, "Price": price})
+
+        fib_df = pd.DataFrame(fib_list)
+        fib_df.sort_values(by="Price", inplace=True, ascending=not uptrend)
+        fib_df.reset_index(drop=True, inplace=True)
+
+        return fib_df
+
+        # مثال استفاده:
+        # df = pd.DataFrame({'High': high_series, 'Low': low_series})
+        # fibs = Indicators.fibonacci_levels(df['High'], df['Low'], lookback=120)
+        # print(fibs)
 
 
 class MovingAverageCross_old:
