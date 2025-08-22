@@ -122,6 +122,143 @@ def _safe_get(obj: Any, path: List[str], default: Any = None) -> Any:
             return default
     return cur if cur is not None else default
 
+
+class TrailingStopManager:
+    """
+    TrailingStopManager — provides parametrized trailing-stop calculations:
+     - chandelier exit (long: highest_high - atr_mult * ATR)
+     - atr-based trailing (current_price - direction * atr_mult * ATR)
+
+    Usage:
+      manager = TrailingStopManager(cfg)
+      new_sl = manager.compute_new_sl(pos, base_df, current_ts, current_price)
+      if new_sl is not None: pos['sl'] = new_sl
+    """
+
+    def __init__(self, cfg: Optional[dict] = None):
+        self.cfg = cfg or {}
+        # default params (can be overridden via cfg['trailing_defaults'])
+        td = (self.cfg.get("env_defaults") or {}).get("trailing_defaults", {}) if isinstance(self.cfg, dict) else {}
+        self.default_mode = td.get("mode", "chandelier")  # "chandelier" or "atr"
+        self.chandelier_period = int(td.get("chandelier_period", 22))
+        self.chandelier_atr_mult = float(td.get("chandelier_atr_mult", 3.0))
+        self.atr_period = int(td.get("atr_period", 14))
+        self.atr_mult = float(td.get("atr_mult", 1.5))
+        # minimum atr required to update (to avoid nan early in series)
+        self.min_atr_non_nan = int(td.get("min_atr_non_nan", max(self.chandelier_period, self.atr_period)))
+
+    @staticmethod
+    def _compute_atr(series_df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """
+        Robust ATR calculation returning a pandas Series aligned with series_df.index.
+        Uses Wilder's smoothing (RMA).
+        """
+        if series_df is None or series_df.empty:
+            return pd.Series([], dtype=float)
+        high = series_df["high"].astype(float)
+        low = series_df["low"].astype(float)
+        close = series_df["close"].astype(float)
+
+        tr1 = (high - low).abs()
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        # Wilder RMA (exponential smoothing with alpha = 1/period)
+        atr = tr.ewm(alpha=1.0 / period, adjust=False).mean()
+        return atr
+
+    def _find_index_for_timestamp(self, df: pd.DataFrame, ts: Optional[pd.Timestamp]) -> int:
+        """
+        Return integer index in df that corresponds to timestamp ts (ffill).
+        If df has no DatetimeIndex, return last index.
+        """
+        if df is None or df.empty:
+            return -1
+        if ts is None:
+            return len(df) - 1
+        if isinstance(df.index, pd.DatetimeIndex):
+            pos = df.index.get_indexer([ts], method="ffill")[0]
+            if pos == -1:
+                # fallback: last available <= ts not found, return last index
+                return max(0, len(df) - 1)
+            return int(pos)
+        # if time column exists, try to parse
+        if "time" in df.columns:
+            times = pd.to_datetime(df["time"], errors="coerce")
+            idx = np.searchsorted(times.values, np.datetime64(ts), side="right") - 1
+            idx = max(0, min(idx, len(times) - 1))
+            return int(idx)
+        # fallback
+        return len(df) - 1
+
+    def compute_new_sl(
+        self,
+        pos: Dict[str, Any],
+        base_df: pd.DataFrame,
+        current_ts: Optional[pd.Timestamp] = None,
+        current_price: Optional[float] = None,
+    ) -> Optional[float]:
+        """
+        Compute a new trailing SL for `pos` using base_df (the base timeframe DataFrame)
+        and the timestamp/current_price. Returns new SL price or None if not applicable.
+
+        pos: dict must contain at least 'direction' (1 or -1). Optional keys:
+             - 'trailing_mode' : "chandelier" or "atr" (overrides default)
+             - 'trailing_period', 'atr_mult', 'chandelier_period', 'chandelier_atr_mult'
+        """
+        if base_df is None or base_df.empty:
+            return None
+        # decide method
+        mode = pos.get("trailing_mode", self.default_mode)
+        # compute index for current timestamp
+        idx = self._find_index_for_timestamp(base_df, current_ts)
+        if idx < 0 or idx >= len(base_df):
+            return None
+
+        # compute ATR series once
+        # choose the maximum period to ensure we have values
+        period_for_atr = int(pos.get("atr_period", self.atr_period))
+        atr_series = self._compute_atr(base_df, period=period_for_atr)
+        atr_val = None
+        try:
+            atr_val = float(atr_series.iloc[idx])
+        except Exception:
+            atr_val = None
+
+        # if ATR not available yet, skip
+        if atr_val is None or np.isnan(atr_val):
+            return None
+
+        direction = int(pos.get("direction", 1))
+        # method-specific logic
+        if mode == "chandelier":
+            per = int(pos.get("chandelier_period", self.chandelier_period))
+            atr_mult = float(pos.get("chandelier_atr_mult", self.chandelier_atr_mult))
+            start_idx = max(0, idx - per + 1)
+            window = base_df.iloc[start_idx : idx + 1]
+            if window.empty:
+                return None
+            highest = float(window["high"].max())
+            lowest = float(window["low"].min())
+            if direction == 1:
+                # long: CE = highest_high - atr_mult * ATR
+                new_sl = highest - atr_mult * atr_val
+            else:
+                # short: CE = lowest_low + atr_mult * ATR
+                new_sl = lowest + atr_mult * atr_val
+            return float(new_sl)
+        else:
+            # default to ATR base trailing: distance = atr_mult * ATR
+            atr_mult = float(pos.get("atr_mult", self.atr_mult))
+            if current_price is None or np.isnan(current_price):
+                # fallback to close price at idx
+                try:
+                    current_price = float(base_df["close"].iloc[idx])
+                except Exception:
+                    return None
+            new_sl = current_price - direction * (atr_mult * atr_val)
+            return float(new_sl)
+
 # -------------------------
 # Helper for time features
 # -------------------------
@@ -339,6 +476,10 @@ class TradingEnv(gym.Env):
             n_clusters=5,
             prominence=0.001
         )
+
+        # ----- trailing manager (Chandelier / ATR) -----
+        self.trailing_manager = TrailingStopManager(cfg=self.cfg)
+
 
     # ---------------- Gym API ----------------
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
@@ -838,15 +979,34 @@ class TradingEnv(gym.Env):
                     if pos.get("sl") is None or (dir_ == 1 and new_sl > pos["sl"]) or (dir_ == -1 and new_sl < pos["sl"]):
                         pos["sl"] = new_sl
                         logger.debug("Riskfree applied: new SL=%.6f", new_sl)
-            # trailing
+            
+            # trailing (use advanced TrailingStopManager if available)
             if pos.get("trailing"):
-                trigger = float(_safe_get(self.cfg, ["env_defaults", "trailing_trigger"], 0.01))
-                trailing_distance = float(_safe_get(self.cfg, ["env_defaults", "trailing_distance"], 0.005))
-                if u_pnl >= trigger * entry * vol:
-                    new_sl = current_price - dir_ * (trailing_distance * current_price)
-                    if pos.get("sl") is None or (dir_ == 1 and new_sl > pos["sl"]) or (dir_ == -1 and new_sl < pos["sl"]):
-                        pos["sl"] = new_sl
-                        logger.debug("Trailing SL updated to %.6f", new_sl)
+                try:
+                    base_df = self.market_data.get(self.timeframes[0], pd.DataFrame())
+                    # obtain base timeframe timestamp for this step
+                    base_ts = self._get_base_timestamp_for_step()
+                    # compute new SL using manager (returns None if not applicable)
+                    new_sl = None
+                    if hasattr(self, "trailing_manager") and self.trailing_manager is not None:
+                        new_sl = self.trailing_manager.compute_new_sl(
+                            pos, base_df, current_ts=base_ts, current_price=current_price
+                        )
+                    # fallback to old simple trailing if manager didn't return a SL
+                    if new_sl is None:
+                        trigger = float(_safe_get(self.cfg, ["env_defaults", "trailing_trigger"], 0.01))
+                        trailing_distance = float(_safe_get(self.cfg, ["env_defaults", "trailing_distance"], 0.005))
+                        if u_pnl >= trigger * entry * vol:
+                            new_sl = current_price - dir_ * (trailing_distance * current_price)
+                    # apply new_sl if it's better/closer in direction of locking profit
+                    if new_sl is not None:
+                        if pos.get("sl") is None or (dir_ == 1 and new_sl > pos["sl"]) or (dir_ == -1 and new_sl < pos["sl"]):
+                            pos["sl"] = new_sl
+                            logger.debug("Trailing SL updated to %.6f", new_sl)
+                except Exception as ex:
+                    logger.exception("Trailing manager error: %s", ex)
+
+
             survivors.append(pos)
         # realize pnl to balance
         if realized != 0.0:
