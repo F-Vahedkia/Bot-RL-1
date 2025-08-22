@@ -90,6 +90,7 @@ def _rma(s: pd.Series, period: int) -> pd.Series:
     alpha = 1.0 / float(period)
     return s.ewm(alpha=alpha, adjust=False, min_periods=period).mean()
 
+
 def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     prev_close = close.shift(1)
     tr = pd.concat([
@@ -98,7 +99,6 @@ def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
         (low - prev_close).abs(),
     ], axis=1).max(axis=1)
     return tr
-
 
 # ---------------------------------------------------------------------------
 # Indicators
@@ -429,6 +429,69 @@ class Indicators:
 
         return df
 
+    class MovingAverageCross:
+        """
+        A flexible Moving Average Crossover detector.
+        Supports both SMA and EMA with arbitrary period pairs.
+        Generates binary signals: 
+            +1 for Bullish crossover (Golden Cross),
+            -1 for Bearish crossover (Death Cross),
+            0 for no signal.
+        """
+
+        def __init__(self, fast_period: int = 20, slow_period: int = 50, ma_type: str = "EMA"):
+            """
+            Initialize the crossover detector.
+            
+            Args:
+                fast_period (int): Period for the fast moving average.
+                slow_period (int): Period for the slow moving average.
+                ma_type (str): Type of MA to use ("SMA" or "EMA").
+            """
+            if fast_period >= slow_period:
+                raise ValueError("Fast period must be smaller than slow period.")
+            if ma_type not in ["SMA", "EMA"]:
+                raise ValueError("ma_type must be either 'SMA' or 'EMA'.")
+
+            self.fast_period = fast_period
+            self.slow_period = slow_period
+            self.ma_type = ma_type.upper()
+
+        def _calc_ma(self, series: pd.Series, period: int) -> pd.Series:
+            """Helper: calculate SMA or EMA."""
+            if self.ma_type == "SMA":
+                return series.rolling(window=period, min_periods=period).mean()
+            elif self.ma_type == "EMA":
+                return series.ewm(span=period, adjust=False).mean()
+
+        def generate_signals(self, df: pd.DataFrame, price_col: str = "close") -> pd.DataFrame:
+            """
+            Generate moving average crossover signals.
+
+            Args:
+                df (pd.DataFrame): Input OHLC dataframe with a 'close' column (or given price_col).
+                price_col (str): Column name for price series.
+
+            Returns:
+                pd.DataFrame: Original dataframe with added columns:
+                    - fast_MA
+                    - slow_MA
+                    - MA_Cross_Signal  (+1, -1, or 0)
+            """
+            df = df.copy()
+
+            # Calculate fast and slow MAs
+            df["fast_MA"] = self._calc_ma(df[price_col], self.fast_period)
+            df["slow_MA"] = self._calc_ma(df[price_col], self.slow_period)
+
+            # Detect crossovers
+            df["MA_Cross_Signal"] = 0
+            df.loc[(df["fast_MA"] > df["slow_MA"]) & (df["fast_MA"].shift(1) <= df["slow_MA"].shift(1)), "MA_Cross_Signal"] = +1
+            df.loc[(df["fast_MA"] < df["slow_MA"]) & (df["fast_MA"].shift(1) >= df["slow_MA"].shift(1)), "MA_Cross_Signal"] = -1
+
+            return df
+
+
     # ---- Volume-based (حجم/فلو) --------------------------------------------
     @staticmethod
     def adl(df: pd.DataFrame) -> pd.DataFrame:
@@ -535,7 +598,6 @@ class Indicators:
 # ---------------------------------------------------------------------------
 # Pipeline for batch computation
 # ---------------------------------------------------------------------------
-
 @dataclass
 class IndicatorSpec:
     name: str
@@ -583,7 +645,6 @@ class FeaturePipeline:
 # ---------------------------------------------------------------------------
 # Sensible default bundle matching user's requested list
 # ---------------------------------------------------------------------------
-
 def default_specs(include_supertrend: bool = False, include_volume: bool = True) -> List[IndicatorSpec]:
     specs: List[IndicatorSpec] = [
         # 1) Trend
@@ -625,7 +686,6 @@ def default_specs(include_supertrend: bool = False, include_volume: bool = True)
 # ---------------------------------------------------------------------------
 # Convenience function
 # ---------------------------------------------------------------------------
-
 def build_features(
     df: pd.DataFrame,
     specs: Optional[Iterable[IndicatorSpec]] = None,
@@ -646,6 +706,19 @@ def build_features(
     pipeline = FeaturePipeline(list(specs))
     return pipeline.apply(df)
 
+# ------------------------------------------------------------------
+# Example of usage inside indicators.py (later in FeaturePipeline)
+# ------------------------------------------------------------------
+if __name__ == "__main__":
+    # Example dummy usage
+    data = pd.DataFrame({
+        "close": np.random.random(100) * 100 + 1800  # mock price series
+    })
+    
+    ma_cross = MovingAverageCross(fast_period=20, slow_period=50, ma_type="EMA")
+    result = ma_cross.generate_signals(data)
+
+    print(result.tail(10)[["close", "fast_MA", "slow_MA", "MA_Cross_Signal"]])
 
 __all__ = [
     "Indicators",
