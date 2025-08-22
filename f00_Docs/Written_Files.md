@@ -18,7 +18,7 @@ trading_env:
 
 indicators:
     https://raw.githubusercontent.com/F-Vahedkia/Bot-RL-1/refs/heads/main/f04_features/indicators.py
-    
+
 support_resistance:
     https://raw.githubusercontent.com/F-Vahedkia/Bot-RL-1/refs/heads/main/f04_features/support_resistance.py
 
@@ -28,6 +28,7 @@ executor:
 config_loader:
     https://raw.githubusercontent.com/F-Vahedkia/Bot-RL-1/refs/heads/main/f10_utils/config_loader.py
     
+logging_cfg:
     https://raw.githubusercontent.com/F-Vahedkia/Bot-RL-1/refs/heads/main/f10_utils/logging_cfg.py
 
 risk_manager:
