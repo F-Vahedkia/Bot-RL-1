@@ -2,16 +2,16 @@
 
 ## ✅ توابع و کلاس‌های موردنیاز (Multi-Timeframe)
 
-- [ ] **FibonacciRetracement**  
+- [X] **FibonacciRetracement**  
   محاسبه سطوح بازگشتی (retracement) بین High و Low.
 
-- [ ] **FibonacciExtension**  
+- [X] **FibonacciExtension**  
   محاسبه سطوح گسترشی (extension) برای تارگت‌های قیمتی.
 
-- [ ] **FibonacciProjection**  
+- [✅] **FibonacciProjection**  
   محاسبه سطوح پیش‌بینی (projection) با استفاده از چند موج قیمتی.
 
-- [ ] **MultiTimeframeFibonacci**  
+- [✅] **MultiTimeframeFibonacci**  
   ترکیب سطوح فیبوناچی در تایم‌فریم‌های مختلف و یافتن نواحی همپوشان (confluence zones).
 
 - [ ] **FibonacciClusterDetector**  
