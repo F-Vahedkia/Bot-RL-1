@@ -329,3 +329,42 @@ if __name__ == "__main__":
     }
     for k, v in demo.items():
         print(f"\n== {k} ==\n", v)
+
+
+
+
+
+
+class MultiTimeframeAutoFibonacci:
+    def __init__(self, price_df, timeframes=("1H","4H","1D")):
+        self.price_df = price_df
+        self.timeframes = timeframes
+        self.results = {}
+
+    def _resample(self, tf):
+        return self.price_df.resample(tf).agg({
+            "Open":"first","High":"max","Low":"min","Close":"last"
+        }).dropna()
+
+    def _detect_swings(self, df, prominence=0.002, min_distance=5):
+        # الگوریتم ترکیبی fractal + prominence + فاصله
+        swings = []
+        for i in range(min_distance, len(df)-min_distance):
+            high, low = df["High"].iloc[i], df["Low"].iloc[i]
+            if high == df["High"].iloc[i-min_distance:i+min_distance+1].max():
+                swings.append(("high", df.index[i], high))
+            elif low == df["Low"].iloc[i-min_distance:i+min_distance+1].min():
+                swings.append(("low", df.index[i], low))
+        return swings
+
+    def run(self):
+        for tf in self.timeframes:
+            df_tf = self._resample(tf)
+            swings = self._detect_swings(df_tf)
+            if len(swings) >= 2:
+                # آخرین Swing High و Swing Low را بگیریم
+                low = min([p for t,_,p in swings if t=="low"])
+                high = max([p for t,_,p in swings if t=="high"])
+                fib = FibonacciRetracement(low, high).levels()
+                self.results[tf] = fib
+        return self.results
