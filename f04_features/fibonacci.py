@@ -5,7 +5,7 @@ from typing import Optional, List, Dict, Tuple, Iterable, Union
 import numpy as np
 import pandas as pd
 from __future__ import annotations
-
+import math
 
 # =========================
 # Core: محاسبات فیبوناچی
@@ -368,7 +368,7 @@ class MultiTimeframeAutoFibonacci:
                 self.results[tf] = fib
         return self.results
 
-
+'''
 # ============================================================
 # Schema reference (برای هماهنگی با کدهای قبلی)
 # ------------------------------------------------------------
@@ -384,7 +384,7 @@ class MultiTimeframeAutoFibonacci:
 # df = FibonacciCore.retracement(high=H, low=L, context={"timeframe": "H1", "leg_id": "swing_12"})
 # سپس می‌توانی ستون‌های "timeframe" و "leg_id" را از context به df اضافه کنی.
 # ============================================================
-
+'''
 
 @dataclass
 class ClusterParams:
@@ -411,7 +411,7 @@ class ClusterParams:
     # امتیازدهی به تایم‌فریم‌ها (اختیاری). اگر خالی باشد، همه 1.0.
     timeframe_weights: Dict[str, float] = field(default_factory=dict)
 
-
+'''
 # ============================================================
 # Schema reference (برای هماهنگی با کدهای قبلی)
 # ------------------------------------------------------------
@@ -427,7 +427,7 @@ class ClusterParams:
 # df = FibonacciCore.retracement(high=H, low=L, context={"timeframe": "H1", "leg_id": "swing_12"})
 # سپس می‌توانی ستون‌های "timeframe" و "leg_id" را از context به df اضافه کنی.
 # ============================================================
-
+'''
 
 @dataclass
 class ClusterParams:
@@ -672,4 +672,230 @@ detector = FibonacciClusterDetector(params)
 clusters = detector.cluster_levels(levels_df, sort_by="score")
 print(clusters.head())
 # ستون‌ها: cluster_id, price_min, price_max, center, width, hits, timeframes, methods, ratios, score
+'''
+
+
+
+####++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+@dataclass
+class FibLevel:
+    """Represent a Fibonacci level observed on a timeframe.
+
+    Attributes:
+        tf: timeframe label (e.g. 'H1', 'H4')
+        ratio: Fibonacci ratio (e.g. 0.618)
+        price: price level (float)
+        meta: optional dict for storing origin info (swing indices, timestamp...)
+    """
+    tf: str
+    ratio: float
+    price: float
+    meta: Dict = field(default_factory=dict)
+
+
+@dataclass
+class Zone:
+    low: float
+    high: float
+    members: List[FibLevel] = field(default_factory=list)
+    strength: float = 0.0
+
+    @property
+    def center(self) -> float:
+        return (self.low + self.high) / 2.0
+
+    def width(self) -> float:
+        return self.high - self.low
+
+
+class GoldenZoneDetector:
+    """Detects Golden Zones (high-confluence Fibonacci retracement areas) and ranks them.
+
+    Design goals:
+    - Compatible with existing fibonacci retracement outputs: accepts per-timeframe Fibonacci levels
+    - Produces merged "zones" where levels from multiple timeframes overlap
+    - Assigns a strength score (count + proximity weight) so zones can be ranked
+    - Highly configurable tolerances but sensible defaults for immediate use
+
+    How to use:
+    1) If you already have computed levels across timeframes, call detect_from_levels(levels).
+       levels: List[dict-like] with keys: {'tf','ratio','price','meta'(optional)} or instances of FibLevel.
+    2) Or call detect_from_retracement(swing_low, swing_high, ratios=[...]) to compute levels from a single retracement.
+    3) After detection, use get_top_zones(n) to fetch the strongest zones.
+    """
+
+    def __init__(
+        self,
+        zone_width_pct: float = 0.006,
+        # zone_width_pct: default half-width fraction around level price (0.006 -> ±0.3%)
+        merge_gap_pct: float = 0.0025,
+        # merge_gap_pct: if two zones are within this fraction they will be considered overlapping/merged
+        min_members: int = 2,
+        # minimum distinct timeframes (members) to consider a zone meaningful
+    ) -> None:
+        self.zone_width_pct = float(zone_width_pct)
+        self.merge_gap_pct = float(merge_gap_pct)
+        self.min_members = int(min_members)
+
+    def _level_to_initial_zone(self, price: float) -> Tuple[float, float]:
+        """Convert a level price to a small zone (low, high) using zone_width_pct."""
+        half = price * (self.zone_width_pct / 2.0)
+        return (price - half, price + half)
+
+    def _zones_overlap(self, z1: Tuple[float, float], z2: Tuple[float, float]) -> bool:
+        # Treat a small gap (merge_gap_pct) as overlap for fuzzy matching
+        low1, high1 = z1
+        low2, high2 = z2
+        gap = max(low1, low2) - min(high1, high2)
+        # gap <= 0 means overlap; allow small positive gap tolerance
+        tol = (abs(high1 + low1) / 2.0) * self.merge_gap_pct
+        return gap <= tol
+
+    def detect_from_levels(self, levels: List[Dict]) -> List[Zone]:
+        """Main entry: detect zones from a list of levels.
+
+        `levels` can be a list of FibLevel instances OR dicts with keys: tf, ratio, price, meta(optional).
+        Returns: merged and scored list of Zone objects sorted by descending strength.
+        """
+        fibs: List[FibLevel] = []
+        for lv in levels:
+            if isinstance(lv, FibLevel):
+                fibs.append(lv)
+            else:
+                # assume dict-like
+                fibs.append(FibLevel(tf=lv.get('tf', 'NA'), ratio=float(lv['ratio']), price=float(lv['price']), meta=lv.get('meta', {})))
+
+        # create initial tiny zones for each level
+        initial = []  # list of (low, high, FibLevel)
+        for f in fibs:
+            low, high = self._level_to_initial_zone(f.price)
+            initial.append((low, high, f))
+
+        # sort by low price
+        initial.sort(key=lambda x: x[0])
+
+        # merge overlapping/fuzzy zones into clusters
+        merged: List[Zone] = []
+        for low, high, f in initial:
+            placed = False
+            for mz in merged:
+                if self._zones_overlap((low, high), (mz.low, mz.high)):
+                    # expand merged zone bounds to include new zone
+                    mz.low = min(mz.low, low)
+                    mz.high = max(mz.high, high)
+                    mz.members.append(f)
+                    placed = True
+                    break
+            if not placed:
+                merged.append(Zone(low=low, high=high, members=[f]))
+
+        # after initial merge, do a second pass to merge zones that became overlapping after expansion
+        merged = self._consolidate_merged_zones(merged)
+
+        # compute strength for each zone
+        for mz in merged:
+            mz.strength = self._compute_zone_strength(mz)
+
+        # filter out weak zones that don't meet min_members (by distinct timeframe)
+        result = [z for z in merged if self._distinct_tf_count(z) >= self.min_members]
+
+        # sort by strength desc
+        result.sort(key=lambda z: z.strength, reverse=True)
+
+        return result
+
+    def _consolidate_merged_zones(self, zones: List[Zone]) -> List[Zone]:
+        if not zones:
+            return []
+        # sort by low
+        zones.sort(key=lambda z: z.low)
+        out: List[Zone] = [zones[0]]
+        for z in zones[1:]:
+            last = out[-1]
+            if self._zones_overlap((last.low, last.high), (z.low, z.high)):
+                # merge
+                last.low = min(last.low, z.low)
+                last.high = max(last.high, z.high)
+                last.members.extend(z.members)
+            else:
+                out.append(z)
+        return out
+
+    def _distinct_tf_count(self, zone: Zone) -> int:
+        return len(set([m.tf for m in zone.members]))
+
+    def _compute_zone_strength(self, zone: Zone) -> float:
+        """Strength heuristic combining:
+        - number of distinct timeframes (primary)
+        - density: how concentrated members are around the center
+        - higher weight to members whose ratio is near 0.618 (configurable policy)
+        """
+        if not zone.members:
+            return 0.0
+        center = zone.center
+        # distinct tf count
+        distinct_tfs = self._distinct_tf_count(zone)
+
+        # proximity score: sum of inverse distance to center (clipped)
+        prox = 0.0
+        for m in zone.members:
+            dist = abs(m.price - center)
+            # convert to relative fraction to avoid scale issues
+            rel = dist / max(1e-8, center)
+            prox += 1.0 / (1.0 + rel * 100.0)  # distances quickly reduce contribution
+
+        # golden affinity: give slight bonus to members close to 0.618 ratio
+        golden_bonus = 0.0
+        for m in zone.members:
+            golden_bonus += max(0.0, (1.0 - abs(m.ratio - 0.618) / 0.1))  # full bonus when within 0.0 of 0.618, fades by 0.1
+
+        # final combination (weights can be tuned or exposed)
+        strength = distinct_tfs * 2.0 + prox + 0.5 * golden_bonus
+        return float(strength)
+
+    def get_top_zones(self, zones: List[Zone], n: int = 3) -> List[Zone]:
+        return sorted(zones, key=lambda z: z.strength, reverse=True)[:n]
+
+    def detect_from_retracement(self, swing_low: float, swing_high: float, ratios: Optional[List[float]] = None, tf: str = 'NA') -> List[Zone]:
+        """Convenience helper: compute Fibonacci levels from a single swing and detect golden zones.
+
+        swing_low, swing_high: float prices (low < high for bull retracement; handler will work either way)
+        ratios: list of Fibonacci ratios to compute (default common set)
+        tf: optional timeframe tag to attach to produced levels
+        """
+        if ratios is None:
+            ratios = [0.236, 0.382, 0.5, 0.618, 0.786]
+
+        levels = []
+        high = max(swing_high, swing_low)
+        low = min(swing_high, swing_low)
+        rng = high - low
+        # for each ratio compute price = high - ratio * range (typical retracement formula)
+        for r in ratios:
+            price = high - r * rng
+            levels.append(FibLevel(tf=tf, ratio=r, price=price, meta={'from': 'single_retracement'}))
+
+        return self.detect_from_levels(levels)
+
+'''
+# ------------------------
+# Example (non-executing) usage to integrate into fibonacci.py
+# ------------------------
+#
+# detector = GoldenZoneDetector(zone_width_pct=0.006, merge_gap_pct=0.0025, min_members=2)
+#
+# # If you already have multi-timeframe levels (list of dicts):
+# multi_tf_levels = [
+#     {'tf':'H1','ratio':0.618,'price':1.2345},
+#     {'tf':'H4','ratio':0.618,'price':1.2339},
+#     {'tf':'D1','ratio':0.5,'price':1.2360},
+# ]
+# zones = detector.detect_from_levels(multi_tf_levels)
+# top = detector.get_top_zones(zones, n=3)
+#
+# # Or compute from swing points:
+# zones_from_retr = detector.detect_from_retracement(swing_low=1.2000, swing_high=1.2500, tf='H1')
+#
+# ------------------------
+# End of GoldenZoneDetector
 '''
