@@ -662,6 +662,8 @@ class FibonacciClusterDetector:
         ])
 
 '''
+نمونه استفاده (خیلی کوتاه)
+
 # 1) فرض: levels_df را از قبل ساخته‌ای (مثلاً با FibonacciCore.retracement + الحاق تایم‌فریم‌ها)
 # یا با build_levels_df_from_swings(...)
 params = ClusterParams(tolerance_mode="rel", rel_tolerance=0.001, min_hits=2)
