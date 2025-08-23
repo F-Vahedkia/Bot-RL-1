@@ -164,49 +164,183 @@ class FibonacciAnalyzer:
     def cluster_zones(
         self,
         fib_level_frames: Iterable[pd.DataFrame],
-        tolerance: float = 0.002
+        tolerance: float = 0.002,
+        extra_signals: Optional[pd.DataFrame] = None,
+        weights: Optional[Dict[str, float]] = None,
     ) -> pd.DataFrame:
         """
-        یافتن نواحی خوشه‌ای سطوح فیبوناچی.
-        ورودی: iterable از DataFrameهایی که ستون 'price' دارند (مثل خروجی‌های retracement/extension/projection)
-        tolerance: تحمل نسبی (مثلاً 0.002 = دو دهم درصد)
+        یافتن نواحی خوشه‌ای فیبوناچی + محاسبه Confluence Score.
 
-        خروجی: DataFrame با ستون‌های:
-          ['cluster_id','cluster_low','cluster_high','center','count','type']
+        Parameters
+        ----------
+        fib_level_frames : iterable of pd.DataFrame
+            لیستی از DataFrameها که شامل ستون "price" و متادیتا مثل "ratio","tf","type" هستند.
+            مثال: خروجی متدهای retracement / extension / projection.
+        tolerance : float
+            آستانه خوشه‌بندی نسبی (۰.۰۰۲ یعنی ۰.۲٪).
+        extra_signals : pd.DataFrame, optional
+            اندیکاتورهای اضافی (MA/RSI/Support/Resistance).
+            باید ستونی به نام "price" داشته باشد.
+        weights : dict, optional
+            وزن معیارها برای محاسبه نمره. اگر None، مقدار پیش‌فرض زیر استفاده می‌شود:
+              {
+                "count": 0.25,
+                "timeframes": 0.25,
+                "golden_ratio": 0.25,
+                "density": 0.15,
+                "extra_signals": 0.10
+              }
+
+        Returns
+        -------
+        pd.DataFrame
+            شامل ستون‌های:
+              [
+                cluster_id,
+                cluster_low,
+                cluster_high,
+                center,
+                count,
+                unique_timeframes,
+                width,
+                score,
+                type
+              ]
         """
-        # جمع‌آوری همه سطوح
-        prices = []
+
+        # -----------------------------
+        # وزن‌های پیش‌فرض
+        # -----------------------------
+        if weights is None:
+            weights = {
+                "count": 0.25,
+                "timeframes": 0.25,
+                "golden_ratio": 0.25,
+                "density": 0.15,
+                "extra_signals": 0.10,
+            }
+
+        # -----------------------------
+        # جمع‌آوری داده‌ها
+        # -----------------------------
+        levels = []
         for df in fib_level_frames:
             if not isinstance(df, pd.DataFrame) or "price" not in df.columns:
                 continue
-            prices.extend(df["price"].dropna().tolist())
+            for _, row in df.iterrows():
+                levels.append(
+                    {
+                        "price": row["price"],
+                        "ratio": row.get("ratio", None),
+                        "tf": row.get("tf", None),
+                        "type": row.get("type", None),
+                    }
+                )
 
-        if not prices:
-            return pd.DataFrame(columns=["cluster_id", "cluster_low", "cluster_high", "center", "count", "type"])
+        if not levels:
+            return pd.DataFrame(
+                columns=[
+                    "cluster_id",
+                    "cluster_low",
+                    "cluster_high",
+                    "center",
+                    "count",
+                    "unique_timeframes",
+                    "width",
+                    "score",
+                    "type",
+                ]
+            )
 
-        prices = sorted(prices)
+        # -----------------------------
+        # خوشه‌بندی بر اساس tolerance
+        # -----------------------------
+        prices = sorted([lvl["price"] for lvl in levels])
         clusters = []
-        start = prices[0]
-        current = [start]
+        current = [prices[0]]
 
         for p in prices[1:]:
             if abs(p - current[-1]) / current[-1] <= tolerance:
                 current.append(p)
             else:
                 if len(current) >= 2:
-                    clusters.append((min(current), max(current), float(np.mean(current)), len(current)))
+                    clusters.append(current)
                 current = [p]
-        # آخرین بسته
+
         if len(current) >= 2:
-            clusters.append((min(current), max(current), float(np.mean(current)), len(current)))
+            clusters.append(current)
 
-        out = pd.DataFrame(clusters, columns=["cluster_low", "cluster_high", "center", "count"])
-        if out.empty:
-            return pd.DataFrame(columns=["cluster_id", "cluster_low", "cluster_high", "center", "count", "type"])
+        if not clusters:
+            return pd.DataFrame(
+                columns=[
+                    "cluster_id",
+                    "cluster_low",
+                    "cluster_high",
+                    "center",
+                    "count",
+                    "unique_timeframes",
+                    "width",
+                    "score",
+                    "type",
+                ]
+            )
 
-        out.insert(0, "cluster_id", range(1, len(out) + 1))
-        out["type"] = "cluster"
-        return out[["cluster_id", "cluster_low", "cluster_high", "center", "count", "type"]]
+        # -----------------------------
+        # محاسبه متریک‌ها برای هر خوشه
+        # -----------------------------
+        out_rows: List[dict] = []
+        for cid, cluster in enumerate(clusters, start=1):
+            c_low = min(cluster)
+            c_high = max(cluster)
+            center = float(np.mean(cluster))
+            width = c_high - c_low
+
+            # فیلتراسیون داده‌های مربوط به این خوشه
+            related = [lvl for lvl in levels if c_low <= lvl["price"] <= c_high]
+
+            count = len(related)
+            unique_timeframes = len(set([lvl["tf"] for lvl in related if lvl["tf"]]))
+
+            # نزدیکی به سطح طلایی 0.618
+            golden_level = 0.618
+            golden_distance = min([abs(lvl["ratio"] - golden_level) for lvl in related if lvl["ratio"] is not None] or [1.0])
+            golden_score = 1 - golden_distance  # هرچه نزدیک‌تر به 0.618 → بهتر
+
+            # تراکم قیمتی (خوشه فشرده‌تر بهتر است)
+            density_score = 1 / (1 + width / center)
+
+            # بررسی هم‌پوشانی با extra_signals
+            extra_score = 0
+            if extra_signals is not None and "price" in extra_signals.columns:
+                for sig_price in extra_signals["price"]:
+                    if c_low <= sig_price <= c_high:
+                        extra_score = 1
+                        break
+
+            # نرمال‌سازی و محاسبه score نهایی
+            score = (
+                weights["count"] * min(count / 10, 1.0)
+                + weights["timeframes"] * min(unique_timeframes / 5, 1.0)
+                + weights["golden_ratio"] * golden_score
+                + weights["density"] * density_score
+                + weights["extra_signals"] * extra_score
+            )
+
+            out_rows.append(
+                {
+                    "cluster_id": cid,
+                    "cluster_low": c_low,
+                    "cluster_high": c_high,
+                    "center": center,
+                    "count": count,
+                    "unique_timeframes": unique_timeframes,
+                    "width": width,
+                    "score": round(score * 100, 2),  # نمره نهایی ۰–۱۰۰
+                    "type": "cluster",
+                }
+            )
+
+        return pd.DataFrame(out_rows)
 
     # ------------------------------
     # 5) Golden Zone Distance (DF)
@@ -468,7 +602,6 @@ if __name__ == "__main__":
     }
     for k, v in demo.items():
         print(f"\n== {k} ==\n", v)
-
 
 
 class MultiTimeframeAutoFibonacci:
