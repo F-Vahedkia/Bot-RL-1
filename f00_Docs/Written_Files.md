@@ -16,6 +16,9 @@ fetch_data.py:
 trading_env.py:
     https://raw.githubusercontent.com/F-Vahedkia/Bot-RL-1/refs/heads/main/f03_env/trading_env.py
 
+fibonacci.py:
+    https://raw.githubusercontent.com/F-Vahedkia/Bot-RL-1/refs/heads/main/f04_features/fibonacci.py
+
 indicators.py:
     https://raw.githubusercontent.com/F-Vahedkia/Bot-RL-1/refs/heads/main/f04_features/indicators.py
 
