@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Tuple, Iterable, Union
+from typing import Optional, List, Dict, Tuple, Iterable, Union, Any
 
 import numpy as np
 import pandas as pd
@@ -214,42 +214,124 @@ class FibonacciAnalyzer:
     def golden_zone_distance(
         self,
         price: float,
-        swing_high: float,
-        swing_low: float,
         *,
-        ratios: Tuple[float, float] = (0.618, 0.786),
-        normalize: str = "relative",  # "relative" -> درصد نسبت به center, "absolute" -> پیپ/واحد قیمت
+        swing_high: Optional[float] = None,
+        swing_low: Optional[float] = None,
+        retracement_df: Optional[pd.DataFrame] = None,
+        ratios: Iterable[float] = (0.618, 0.786),
+        normalize: str = "relative",  # "relative" or "absolute"
+        level_name_fmt: str = "R_{:.3f}",
+        ratio_match_tol: float = 1e-3,
     ) -> pd.DataFrame:
         """
-        فاصلهٔ نرمال‌شدهٔ یک قیمت تا ناحیهٔ طلایی بین دو نسبتِ فیب‌  (پیش‌فرض 61.8%–78.6%).
+        محاسبهٔ فاصلهٔ قیمت تا \"Golden Zone\" تعریف‌شده توسط مجموعه‌ای از نسبت‌های فیبوناچی.
 
-        پارامترها:
-        - price: قیمت جاری / نقطه‌ای که می‌خواهیم فاصله تا Golden Zone را محاسبه کنیم.
-        - swing_high, swing_low: نقاط swing که سطوح بازگشتی نسبت به آن‌ها محاسبه می‌شوند.
-        - ratios: تاپلِ دو نسبت که ناحیهٔ طلایی را تعریف می‌کنند (پیش‌فرض (0.618, 0.786)).
-        - normalize: نحوهٔ خروجی فاصله — "relative" (نسبت به center ناحیه) یا "absolute" (مقدار قیمت).
+        رفتار:
+        - اگر `retracement_df` داده شود، سعی می‌کند قیمتِ نسبت‌ها را از آن استخراج کند.
+            - پذیرفته می‌شود که DataFrame شامل ستون‌های ('level_name','price') باشد
+            یا شامل ستون‌های ('ratio','price') باشد.
+            - اگر نسبت خاصی در retracement_df پیدا نشد و swing_high/low موجود باشد،
+            آن نسبت را با فرمول مستقیم محاسبه می‌کند.
+        - در صورتی که retracement_df داده نشده باشد ولی swing_high/low فراهم باشد،
+            قیمت‌ها از high/low محاسبه می‌شوند.
+        - اگر برای یک نسبت نه retracement و نه swing وجود داشته باشد، خطا می‌دهد.
 
-        خروجی (DataFrame تک-ردیفه):
-        ['g_low', 'g_high', 'center', 'price', 'distance_abs', 'distance_rel', 'in_zone',
-        'nearest_level', 'nearest_ratio', 'nearest_dist_abs', 'nearest_dist_rel', 'type']
+        خروجی: یک DataFrame تک‌ردیفه شامل فیلدهای:
+        ['g_low','g_high','center','price','distance_abs','distance_rel','in_zone',
+        'nearest_level','nearest_ratio','nearest_dist_abs','nearest_dist_rel','members']
+        members: لیستی از دیکشنری‌هایی که منابع هر نسبت را نشان می‌دهد
+                (مثلاً {'ratio':0.618,'price':1.2345,'source':'retracement'|'calc'})
         """
-        # اطمینان از ترتیب high/low
-        high, low = FibonacciCore._ensure_order(swing_high, swing_low)
+        # تبدیل ratios به لیست و اعتبارسنجی
+        ratio_list = list(ratios)
+        if not ratio_list:
+            raise ValueError("`ratios` باید شامل حداقل یک نسبت فیبوناچی باشد.")
 
-        # محاسبهٔ قیمت هر نسبت مستقیم (مستقل از retracement() برای ایمنی و سرعت)
-        def _price_at_ratio(r: float) -> float:
+        # helper: امن‌سازی ترتیب high/low
+        def _ensure_order(h: float, l: float) -> Tuple[float, float]:
+            return (h, l) if h >= l else (l, h)
+
+        # helper: محاسبه قیمت از high/low برای یک نسبت
+        def _price_at_ratio_from_swings(r: float, high: float, low: float) -> float:
             return high - r * (high - low)
 
-        # محاسبهٔ سطوح نسبت‌ها و ترتیب‌دهی
-        ratio_list = list(ratios)
-        ratio_prices = {r: _price_at_ratio(r) for r in ratio_list}
+        # تلاش برای استخراج قیمت‌ها از retracement_df (در صورت موجود بودن)
+        ratio_prices: Dict[float, float] = {}
+        members = []
 
-        # ناحیهٔ طلایی و مرکز
-        g_low = min(ratio_prices.values())
-        g_high = max(ratio_prices.values())
+        if retracement_df is not None and not retracement_df.empty:
+            df = retracement_df.copy()
+            # normalize column names expectation
+            # case 1: df has 'ratio' and 'price'
+            if 'ratio' in df.columns and 'price' in df.columns:
+                # convert ratios to float keys for matching
+                for r in ratio_list:
+                    # exact match on ratio column (allow small tol)
+                    cand = df[ (df['ratio'].astype(float) - float(r)).abs() <= ratio_match_tol ]
+                    if not cand.empty:
+                        p = float(cand.iloc[0]['price'])
+                        ratio_prices[r] = p
+                        members.append({'ratio': r, 'price': p, 'source': 'retracement'})
+            # case 2: df has 'level_name' and 'price' (e.g. 'R_0.618')
+            if 'level_name' in df.columns and 'price' in df.columns:
+                # attempt to parse float from level_name when possible
+                # try two formats: exact formatted level_name_fmt or extract last numeric part
+                for r in ratio_list:
+                    target_name = level_name_fmt.format(r)
+                    cand = df[df['level_name'] == target_name]
+                    if not cand.empty:
+                        p = float(cand.iloc[0]['price'])
+                        ratio_prices[r] = p
+                        # avoid duplicate member entry if already recorded
+                        if not any(m['ratio'] == r for m in members):
+                            members.append({'ratio': r, 'price': p, 'source': 'retracement'})
+                # fallback: try to extract numeric suffix from level_name and match by tolerance
+                if len(ratio_prices) < len(ratio_list):
+                    # extract numeric tokens in level_name and compare
+                    def _extract_ratio_from_name(name: str):
+                        import re
+                        nums = re.findall(r"[0-9]*\.?[0-9]+", str(name))
+                        if nums:
+                            try:
+                                return float(nums[-1])
+                            except Exception:
+                                return None
+                        return None
+                    for _, row in df[['level_name','price']].iterrows():
+                        parsed = _extract_ratio_from_name(row['level_name'])
+                        if parsed is None:
+                            continue
+                        for r in ratio_list:
+                            if r in ratio_prices:
+                                continue
+                            if abs(parsed - r) <= ratio_match_tol:
+                                p = float(row['price'])
+                                ratio_prices[r] = p
+                                members.append({'ratio': r, 'price': p, 'source': 'retracement'})
+                                break
+
+        # اگر برای بعضی نسبت‌ها قیمت نداریم، و swing_high/low موجود است، محاسبه کن
+        if (len(ratio_prices) < len(ratio_list)) and (swing_high is not None and swing_low is not None):
+            high, low = _ensure_order(swing_high, swing_low)
+            for r in ratio_list:
+                if r in ratio_prices:
+                    continue
+                p = float(_price_at_ratio_from_swings(r, high, low))
+                ratio_prices[r] = p
+                members.append({'ratio': r, 'price': p, 'source': 'calc'})
+
+        # اگر هنوز برای بعضی نسبت‌ها مقدار نداریم -> خطا
+        missing = [r for r in ratio_list if r not in ratio_prices]
+        if missing:
+            raise ValueError(f"نتوانستم قیمت برای نسبت‌های {missing} بیابم. لطفاً retracement_df یا swing_high/swing_low را تأمین کن.")
+
+        # محاسبهٔ ناحیهٔ طلایی
+        prices = list(ratio_prices.values())
+        g_low = float(min(prices))
+        g_high = float(max(prices))
         center = (g_low + g_high) / 2.0
 
-        # تعیین اینکه price داخل ناحیه هست یا بیرون و فاصلهٔ مطلق
+        # فاصلهٔ مطلق و تشخیص درون/بیرون بودن
         if price < g_low:
             distance_abs = g_low - price
             in_zone = False
@@ -260,37 +342,37 @@ class FibonacciAnalyzer:
             distance_abs = 0.0
             in_zone = True
 
-        # فاصلهٔ نسبی؛ اگر normalize == "relative" نسبت به center محاسبه می‌شود
+        # فاصلهٔ نسبی (نسبت به center) یا absolute
         if normalize == "absolute":
             distance_rel = float(distance_abs)
         else:
-            # نسبت به center (امن در برابر صفر)
             distance_rel = float(distance_abs / center) if center != 0 else float("nan")
 
-        # اطلاعات سطح نزدیک‌ترین نسبت (برای توسعهٔ بعدی: وزن‌دهی، نمایش و ...)
+        # نزدیک‌ترین سطح (از بین ratio_list)
         nearest_ratio = None
         nearest_level_price = None
         nearest_dist_abs = None
         nearest_dist_rel = None
         if ratio_prices:
-            # پیدا کردن نسبت با کمترین اختلاف مطلق
             nearest_ratio = min(ratio_prices.keys(), key=lambda r: abs(ratio_prices[r] - price))
-            nearest_level_price = ratio_prices[nearest_ratio]
+            nearest_level_price = float(ratio_prices[nearest_ratio])
             nearest_dist_abs = abs(nearest_level_price - price)
             nearest_dist_rel = (nearest_dist_abs / nearest_level_price) if nearest_level_price != 0 else float("nan")
 
+        # جمع‌بندی خروجی — members را هم به‌عنوان تاریخچه/منبع برمی‌گردانیم
         out = {
-            "g_low": float(g_low),
-            "g_high": float(g_high),
+            "g_low": g_low,
+            "g_high": g_high,
             "center": float(center),
             "price": float(price),
             "distance_abs": float(distance_abs),
             "distance_rel": float(distance_rel),
             "in_zone": bool(in_zone),
-            "nearest_level": float(nearest_level_price) if nearest_level_price is not None else None,
+            "nearest_level": nearest_level_price,
             "nearest_ratio": float(nearest_ratio) if nearest_ratio is not None else None,
             "nearest_dist_abs": float(nearest_dist_abs) if nearest_dist_abs is not None else None,
             "nearest_dist_rel": float(nearest_dist_rel) if nearest_dist_rel is not None else None,
+            "members": members,  # useful for debugging / downstream weighting
             "type": "golden_zone",
         }
         return pd.DataFrame([out])
@@ -733,9 +815,6 @@ print(clusters.head())
 # ستون‌ها: cluster_id, price_min, price_max, center, width, hits, timeframes, methods, ratios, score
 '''
 
-
-
-####++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 @dataclass
 class FibLevel:
     """Represent a Fibonacci level observed on a timeframe.
@@ -751,7 +830,6 @@ class FibLevel:
     price: float
     meta: Dict = field(default_factory=dict)
 
-
 @dataclass
 class Zone:
     low: float
@@ -765,7 +843,6 @@ class Zone:
 
     def width(self) -> float:
         return self.high - self.low
-
 
 class GoldenZoneDetector:
     """Detects Golden Zones (high-confluence Fibonacci retracement areas) and ranks them.
