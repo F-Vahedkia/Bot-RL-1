@@ -1,8 +1,10 @@
 # f04_features/fibonacci.py
-from __future__ import annotations
-from typing import List, Dict, Tuple, Optional, Iterable
+
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Tuple, Iterable, Union
 import numpy as np
 import pandas as pd
+from __future__ import annotations
 
 
 # =========================
@@ -332,9 +334,6 @@ if __name__ == "__main__":
 
 
 
-
-
-
 class MultiTimeframeAutoFibonacci:
     def __init__(self, price_df, timeframes=("1H","4H","1D")):
         self.price_df = price_df
@@ -365,6 +364,310 @@ class MultiTimeframeAutoFibonacci:
                 # آخرین Swing High و Swing Low را بگیریم
                 low = min([p for t,_,p in swings if t=="low"])
                 high = max([p for t,_,p in swings if t=="high"])
-                fib = FibonacciRetracement(low, high).levels()
+                fib = FibonacciCore.Retracement(high=high, low=low).levels()
                 self.results[tf] = fib
         return self.results
+
+
+# ============================================================
+# Schema reference (برای هماهنگی با کدهای قبلی)
+# ------------------------------------------------------------
+# انتظار می‌رود DataFrame سطوح فیبوناچی (levels_df) این ستون‌ها را داشته باشد:
+# - timeframe: str        (مثل "M15", "H1", "H4", "D1")
+# - method: str           ("retracement" | "extension" | "projection")
+# - ratio: float          (مثل 0.618 یا 1.618)
+# - price: float          (سطح قیمتی محاسبه‌شده)
+# - leg_id: Optional[str] (شناسه‌ی موج/سوییگ؛ اختیاری اما مفید)
+# - meta:  Optional[dict] (اطلاعات اضافه؛ اختیاری)
+#
+# نمونه‌ی تولید levels_df:
+# df = FibonacciCore.retracement(high=H, low=L, context={"timeframe": "H1", "leg_id": "swing_12"})
+# سپس می‌توانی ستون‌های "timeframe" و "leg_id" را از context به df اضافه کنی.
+# ============================================================
+
+
+@dataclass
+class ClusterParams:
+    """
+    پیکربندی انعطاف‌پذیر برای تشخیص خوشه‌های همپوشان (Confluence Zones).
+    - دو نوع تلورانس را پشتیبانی می‌کند: نسبی (rel) بر حسب درصد/بِیسیس‌پوینت و مطلق (abs) بر حسب قیمت/پیپ.
+    - می‌توان حداقل تعداد برخورد (min_hits) تعیین کرد تا خوشه‌های ضعیف فیلتر شوند.
+    - وزن‌دهی اختیاری بر اساس method/ratio/timeframe برای محاسبه‌ی امتیاز.
+    """
+    tolerance_mode: str = "rel"        # "rel" یا "abs"
+    rel_tolerance: float = 0.001       # 0.001 ≈ 0.1% (100 bps)
+    abs_tolerance: Optional[float] = None  # اگر tolerance_mode="abs"، مثلاً 1.0 برای 1 دلار/پیپ
+    min_hits: int = 2                  # حداقل تعداد سطوح در یک خوشه
+    use_timeframe_diversity: bool = True  # اگر True، تنوع تایم‌فریم امتیاز را افزایش می‌دهد
+    method_weights: Dict[str, float] = field(default_factory=lambda: {
+        "retracement": 1.0,
+        "extension": 0.9,
+        "projection": 0.8
+    })
+    ratio_weights: Dict[float, float] = field(default_factory=lambda: {
+        0.236: 0.7, 0.382: 0.9, 0.5: 1.0, 0.618: 1.2, 0.786: 1.1,
+        1.272: 1.0, 1.618: 1.2, 2.0: 0.9, 2.618: 0.8
+    })
+    # امتیازدهی به تایم‌فریم‌ها (اختیاری). اگر خالی باشد، همه 1.0.
+    timeframe_weights: Dict[str, float] = field(default_factory=dict)
+
+
+# ============================================================
+# Schema reference (برای هماهنگی با کدهای قبلی)
+# ------------------------------------------------------------
+# انتظار می‌رود DataFrame سطوح فیبوناچی (levels_df) این ستون‌ها را داشته باشد:
+# - timeframe: str        (مثل "M15", "H1", "H4", "D1")
+# - method: str           ("retracement" | "extension" | "projection")
+# - ratio: float          (مثل 0.618 یا 1.618)
+# - price: float          (سطح قیمتی محاسبه‌شده)
+# - leg_id: Optional[str] (شناسه‌ی موج/سوییگ؛ اختیاری اما مفید)
+# - meta:  Optional[dict] (اطلاعات اضافه؛ اختیاری)
+#
+# نمونه‌ی تولید levels_df:
+# df = FibonacciCore.retracement(high=H, low=L, context={"timeframe": "H1", "leg_id": "swing_12"})
+# سپس می‌توانی ستون‌های "timeframe" و "leg_id" را از context به df اضافه کنی.
+# ============================================================
+
+
+@dataclass
+class ClusterParams:
+    """
+    پیکربندی انعطاف‌پذیر برای تشخیص خوشه‌های همپوشان (Confluence Zones).
+    - دو نوع تلورانس را پشتیبانی می‌کند: نسبی (rel) بر حسب درصد/بِیسیس‌پوینت و مطلق (abs) بر حسب قیمت/پیپ.
+    - می‌توان حداقل تعداد برخورد (min_hits) تعیین کرد تا خوشه‌های ضعیف فیلتر شوند.
+    - وزن‌دهی اختیاری بر اساس method/ratio/timeframe برای محاسبه‌ی امتیاز.
+    """
+    tolerance_mode: str = "rel"        # "rel" یا "abs"
+    rel_tolerance: float = 0.001       # 0.001 ≈ 0.1% (100 bps)
+    abs_tolerance: Optional[float] = None  # اگر tolerance_mode="abs"، مثلاً 1.0 برای 1 دلار/پیپ
+    min_hits: int = 2                  # حداقل تعداد سطوح در یک خوشه
+    use_timeframe_diversity: bool = True  # اگر True، تنوع تایم‌فریم امتیاز را افزایش می‌دهد
+    method_weights: Dict[str, float] = field(default_factory=lambda: {
+        "retracement": 1.0,
+        "extension": 0.9,
+        "projection": 0.8
+    })
+    ratio_weights: Dict[float, float] = field(default_factory=lambda: {
+        0.236: 0.7, 0.382: 0.9, 0.5: 1.0, 0.618: 1.2, 0.786: 1.1,
+        1.272: 1.0, 1.618: 1.2, 2.0: 0.9, 2.618: 0.8
+    })
+    # امتیازدهی به تایم‌فریم‌ها (اختیاری). اگر خالی باشد، همه 1.0.
+    timeframe_weights: Dict[str, float] = field(default_factory=dict)
+
+
+class FibonacciClusterDetector:
+    """
+    تشخیص نواحی همپوشان سطوح فیبوناچی (Confluence / Cluster Zones)
+    ---------------------------------------------------------------
+    ورودی: DataFrame سطوح فیبوناچی چند-تایم‌فریم (levels_df) با اسکیمای بالا.
+    خروجی: DataFrame خوشه‌ها شامل:
+        - cluster_id
+        - price_min, price_max, center, width
+        - hits (تعداد سطوح)
+        - timeframes (لیست یکتا)
+        - methods (لیست یکتا)
+        - ratios (لیست یکتا)
+        - score (امتیاز قدرت خوشه)
+    """
+
+    def __init__(self, params: Optional[ClusterParams] = None):
+        self.params = params or ClusterParams()
+
+    # ---------- Helper: tolerance ----------
+    def _within_tolerance(self, p1: float, p2: float) -> bool:
+        if self.params.tolerance_mode == "abs":
+            tol = self.params.abs_tolerance if self.params.abs_tolerance is not None else 0.0
+            return abs(p1 - p2) <= tol
+        # relative tolerance (around current price)
+        base = max(abs(p1), abs(p2))
+        return abs(p1 - p2) <= base * self.params.rel_tolerance
+
+    # ---------- Helper: score of a single level ----------
+    def _level_score(self, row: pd.Series) -> float:
+        method_w = self.params.method_weights.get(str(row.get("method", "")).lower(), 1.0)
+        ratio_w = self.params.ratio_weights.get(float(row.get("ratio", 0.0)), 1.0)
+        tf = str(row.get("timeframe", "")).upper()
+        tf_w = self.params.timeframe_weights.get(tf, 1.0)
+        return method_w * ratio_w * tf_w
+
+    # ---------- Helper: diversity boost ----------
+    def _diversity_bonus(self, timeframes: Iterable[str]) -> float:
+        if not self.params.use_timeframe_diversity:
+            return 1.0
+        uniq = len(set([str(t).upper() for t in timeframes if pd.notna(t)]))
+        # تابعی نرم برای افزایش امتیاز با تعداد تایم‌فریم‌ها
+        # 1 TF → 1.00x, 2 TF → 1.10x, 3 TF → 1.20x, ...
+        return 1.0 + 0.10 * max(0, uniq - 1)
+
+    # ---------- Public: cluster ----------
+    def cluster_levels(
+        self,
+        levels_df: pd.DataFrame,
+        sort_by: str = "score"
+    ) -> pd.DataFrame:
+        """
+        خوشه‌بندی سطوح فیبوناچی.
+        Args:
+            levels_df: DataFrame با ستون‌های (timeframe, method, ratio, price, leg_id, meta)
+            sort_by: "score" یا "center" (برای مرتب‌سازی خروجی)
+
+        Returns:
+            clusters_df: DataFrame با ستون‌های:
+                cluster_id, price_min, price_max, center, width,
+                hits, timeframes, methods, ratios, score
+        """
+        if levels_df is None or levels_df.empty:
+            return pd.DataFrame(columns=[
+                "cluster_id", "price_min", "price_max", "center", "width",
+                "hits", "timeframes", "methods", "ratios", "score"
+            ])
+
+        df = levels_df.copy()
+        # اطمینان از وجود ستون‌های کلیدی
+        for col in ["price", "ratio", "method", "timeframe"]:
+            if col not in df.columns:
+                df[col] = np.nan
+
+        # مرتب‌سازی بر اساس قیمت
+        df = df.sort_values(by="price").reset_index(drop=True)
+
+        clusters: List[Dict[str, Union[int, float, List, set]]] = []
+        current_cluster: List[pd.Series] = []
+
+        def finalize_cluster(levels_in_cluster: List[pd.Series]) -> Optional[Dict]:
+            if not levels_in_cluster:
+                return None
+            prices = [float(r["price"]) for r in levels_in_cluster]
+            tfs = [str(r.get("timeframe", "")) for r in levels_in_cluster]
+            methods = [str(r.get("method", "")) for r in levels_in_cluster]
+            ratios = [float(r.get("ratio", np.nan)) for r in levels_in_cluster]
+
+            price_min = float(np.min(prices))
+            price_max = float(np.max(prices))
+            center = float(np.mean(prices))
+            width = price_max - price_min
+
+            # امتیاز پایه = مجموع امتیاز سطح‌ها
+            base_score = float(np.sum([self._level_score(r) for r in levels_in_cluster]))
+            # پاداش تنوع تایم‌فریم
+            score = base_score * self._diversity_bonus(tfs)
+
+            return dict(
+                price_min=price_min,
+                price_max=price_max,
+                center=center,
+                width=width,
+                hits=len(levels_in_cluster),
+                timeframes=sorted(list(set([tf for tf in tfs if tf]))),
+                methods=sorted(list(set([m.lower() for m in methods if m]))),
+                ratios=sorted(list(set([r for r in ratios if not np.isnan(r)]))),
+                score=round(score, 4),
+            )
+
+        # پیمایش ترتیبی و ساخت خوشه‌ها با آستانه‌ی مجاز
+        for _, row in df.iterrows():
+            if not current_cluster:
+                current_cluster = [row]
+                continue
+
+            # اگر قیمتِ جدید داخل تلورانس نسبت به مرکز خوشه فعلی بود → اضافه کن
+            current_center = float(np.mean([float(r["price"]) for r in current_cluster]))
+            if self._within_tolerance(current_center, float(row["price"])):
+                current_cluster.append(row)
+            else:
+                # خوشه‌ی فعلی را نهایی کن
+                cl = finalize_cluster(current_cluster)
+                if cl and cl["hits"] >= self.params.min_hits:
+                    clusters.append(cl)
+                # خوشه‌ی جدید را با آیتم جاری آغاز کن
+                current_cluster = [row]
+
+        # آخرین خوشه
+        cl = finalize_cluster(current_cluster)
+        if cl and cl["hits"] >= self.params.min_hits:
+            clusters.append(cl)
+
+        if not clusters:
+            return pd.DataFrame(columns=[
+                "cluster_id", "price_min", "price_max", "center", "width",
+                "hits", "timeframes", "methods", "ratios", "score"
+            ])
+
+        clusters_df = pd.DataFrame(clusters).reset_index().rename(columns={"index": "cluster_id"})
+
+        # مرتب‌سازی خروجی
+        if sort_by in {"score", "center", "price_min", "price_max", "hits", "width"}:
+            ascending = (sort_by != "score" and sort_by != "hits")
+            clusters_df = clusters_df.sort_values(by=sort_by, ascending=ascending, ignore_index=True)
+
+        return clusters_df
+
+    # ---------- Utility: build levels_df from multiple swings ----------
+    @staticmethod
+    def build_levels_df_from_swings(
+        swings_by_tf: Dict[str, List[Tuple[float, float, Optional[str]]]],
+        # مثال: {"H1": [(high1, low1, "s1"), (high2, low2, "s2")], "H4": [...]}
+        method: str = "retracement",
+        ratios: Optional[List[float]] = None
+    ) -> pd.DataFrame:
+        """
+        اگر خروجی‌ات از «استخراج سوییگ چندتایم‌فریم» به‌صورت دیکشنری high/low باشد،
+        این تابع به‌سرعت آن‌ها را به یک levels_df استاندارد تبدیل می‌کند.
+
+        Args:
+            swings_by_tf: دیکشنری تایم‌فریم ← لیست (high, low, leg_id)
+            method: نوع سطح ("retracement" | "extension" | "projection")
+            ratios: اگر None باشد، برای retracement از ratios پیش‌فرض FibonacciCore استفاده می‌شود.
+
+        Returns:
+            levels_df: DataFrame استاندارد سطوح.
+        """
+        records: List[Dict] = []
+        use_ratios = ratios
+        if use_ratios is None:
+            if method == "retracement":
+                use_ratios = [0.236, 0.382, 0.5, 0.618, 0.786]
+            elif method == "extension":
+                use_ratios = [1.272, 1.618, 2.0, 2.618]
+            elif method == "projection":
+                use_ratios = [0.618, 1.0, 1.618]
+            else:
+                use_ratios = []
+
+        for tf, legs in swings_by_tf.items():
+            for (high, low, leg_id) in legs:
+                if method == "retracement":
+                    diff = high - low
+                    for r in use_ratios:
+                        price = high - r * diff
+                        records.append({
+                            "timeframe": tf, "method": "retracement", "ratio": float(r),
+                            "price": float(price), "leg_id": leg_id
+                        })
+                elif method == "extension":
+                    diff = high - low
+                    for r in use_ratios:
+                        price = high + r * diff
+                        records.append({
+                            "timeframe": tf, "method": "extension", "ratio": float(r),
+                            "price": float(price), "leg_id": leg_id
+                        })
+                elif method == "projection":
+                    # برای projection باید A/B/C داشته باشیم؛ اینجا صرفاً اسکلت آماده است.
+                    # اگر A/B/C در دسترس نیست، بهتر است از مسیر دیگر تولید شود.
+                    continue
+
+        return pd.DataFrame.from_records(records, columns=[
+            "timeframe", "method", "ratio", "price", "leg_id"
+        ])
+
+'''
+# 1) فرض: levels_df را از قبل ساخته‌ای (مثلاً با FibonacciCore.retracement + الحاق تایم‌فریم‌ها)
+# یا با build_levels_df_from_swings(...)
+params = ClusterParams(tolerance_mode="rel", rel_tolerance=0.001, min_hits=2)
+detector = FibonacciClusterDetector(params)
+
+clusters = detector.cluster_levels(levels_df, sort_by="score")
+print(clusters.head())
+# ستون‌ها: cluster_id, price_min, price_max, center, width, hits, timeframes, methods, ratios, score
+'''
