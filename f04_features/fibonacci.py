@@ -1,11 +1,12 @@
 # f04_features/fibonacci.py
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple, Iterable, Union
+
 import numpy as np
 import pandas as pd
-from __future__ import annotations
-import math
 
 # =========================
 # Core: محاسبات فیبوناچی
@@ -210,35 +211,89 @@ class FibonacciAnalyzer:
     # ------------------------------
     # 5) Golden Zone Distance (DF)
     # ------------------------------
-    def golden_zone_distance(self, price: float, swing_high: float, swing_low: float) -> pd.DataFrame:
+    def golden_zone_distance(
+        self,
+        price: float,
+        swing_high: float,
+        swing_low: float,
+        *,
+        ratios: Tuple[float, float] = (0.618, 0.786),
+        normalize: str = "relative",  # "relative" -> درصد نسبت به center, "absolute" -> پیپ/واحد قیمت
+    ) -> pd.DataFrame:
         """
-        فاصلهٔ نرمال‌شدهٔ قیمت تا ناحیهٔ طلایی (61.8%–78.6%) بر حسب نسبی.
-        خروجی: ['g_low','g_high','price','distance','in_zone','type']
-        """
-        retr = FibonacciCore.retracement(swing_high, swing_low)
-        # استخراج سطوح
-        r618 = retr.loc[retr["level_name"] == "R_0.618", "price"].iloc[0]
-        r786 = retr.loc[retr["level_name"] == "R_0.786", "price"].iloc[0]
-        g_low, g_high = min(r618, r786), max(r618, r786)  # برای هر جهتِ سوییگ
+        فاصلهٔ نرمال‌شدهٔ یک قیمت تا ناحیهٔ طلایی بین دو نسبتِ فیب‌  (پیش‌فرض 61.8%–78.6%).
 
+        پارامترها:
+        - price: قیمت جاری / نقطه‌ای که می‌خواهیم فاصله تا Golden Zone را محاسبه کنیم.
+        - swing_high, swing_low: نقاط swing که سطوح بازگشتی نسبت به آن‌ها محاسبه می‌شوند.
+        - ratios: تاپلِ دو نسبت که ناحیهٔ طلایی را تعریف می‌کنند (پیش‌فرض (0.618, 0.786)).
+        - normalize: نحوهٔ خروجی فاصله — "relative" (نسبت به center ناحیه) یا "absolute" (مقدار قیمت).
+
+        خروجی (DataFrame تک-ردیفه):
+        ['g_low', 'g_high', 'center', 'price', 'distance_abs', 'distance_rel', 'in_zone',
+        'nearest_level', 'nearest_ratio', 'nearest_dist_abs', 'nearest_dist_rel', 'type']
+        """
+        # اطمینان از ترتیب high/low
+        high, low = FibonacciCore._ensure_order(swing_high, swing_low)
+
+        # محاسبهٔ قیمت هر نسبت مستقیم (مستقل از retracement() برای ایمنی و سرعت)
+        def _price_at_ratio(r: float) -> float:
+            return high - r * (high - low)
+
+        # محاسبهٔ سطوح نسبت‌ها و ترتیب‌دهی
+        ratio_list = list(ratios)
+        ratio_prices = {r: _price_at_ratio(r) for r in ratio_list}
+
+        # ناحیهٔ طلایی و مرکز
+        g_low = min(ratio_prices.values())
+        g_high = max(ratio_prices.values())
+        center = (g_low + g_high) / 2.0
+
+        # تعیین اینکه price داخل ناحیه هست یا بیرون و فاصلهٔ مطلق
         if price < g_low:
-            distance = (g_low - price) / g_low
+            distance_abs = g_low - price
             in_zone = False
         elif price > g_high:
-            distance = (price - g_high) / g_high
+            distance_abs = price - g_high
             in_zone = False
         else:
-            distance = 0.0
+            distance_abs = 0.0
             in_zone = True
 
-        return pd.DataFrame([{
-            "g_low": g_low,
-            "g_high": g_high,
-            "price": price,
-            "distance": float(distance),
+        # فاصلهٔ نسبی؛ اگر normalize == "relative" نسبت به center محاسبه می‌شود
+        if normalize == "absolute":
+            distance_rel = float(distance_abs)
+        else:
+            # نسبت به center (امن در برابر صفر)
+            distance_rel = float(distance_abs / center) if center != 0 else float("nan")
+
+        # اطلاعات سطح نزدیک‌ترین نسبت (برای توسعهٔ بعدی: وزن‌دهی، نمایش و ...)
+        nearest_ratio = None
+        nearest_level_price = None
+        nearest_dist_abs = None
+        nearest_dist_rel = None
+        if ratio_prices:
+            # پیدا کردن نسبت با کمترین اختلاف مطلق
+            nearest_ratio = min(ratio_prices.keys(), key=lambda r: abs(ratio_prices[r] - price))
+            nearest_level_price = ratio_prices[nearest_ratio]
+            nearest_dist_abs = abs(nearest_level_price - price)
+            nearest_dist_rel = (nearest_dist_abs / nearest_level_price) if nearest_level_price != 0 else float("nan")
+
+        out = {
+            "g_low": float(g_low),
+            "g_high": float(g_high),
+            "center": float(center),
+            "price": float(price),
+            "distance_abs": float(distance_abs),
+            "distance_rel": float(distance_rel),
             "in_zone": bool(in_zone),
-            "type": "golden_zone"
-        }])
+            "nearest_level": float(nearest_level_price) if nearest_level_price is not None else None,
+            "nearest_ratio": float(nearest_ratio) if nearest_ratio is not None else None,
+            "nearest_dist_abs": float(nearest_dist_abs) if nearest_dist_abs is not None else None,
+            "nearest_dist_rel": float(nearest_dist_rel) if nearest_dist_rel is not None else None,
+            "type": "golden_zone",
+        }
+        return pd.DataFrame([out])
 
     # ------------------------------
     # 6) Risk/Reward Tool (DF)
@@ -362,9 +417,13 @@ class MultiTimeframeAutoFibonacci:
             swings = self._detect_swings(df_tf)
             if len(swings) >= 2:
                 # آخرین Swing High و Swing Low را بگیریم
-                low = min([p for t,_,p in swings if t=="low"])
-                high = max([p for t,_,p in swings if t=="high"])
-                fib = FibonacciCore.Retracement(high=high, low=low).levels()
+                lows = min([p for t,_,p in swings if t=="low"])
+                highs = max([p for t,_,p in swings if t=="high"])
+                if not highs or not lows:
+                    continue  # یا ثبت لاگ و عبور از این timeframe
+                low = min(lows)
+                high = max(highs)
+                fib = FibonacciCore.Retracement(high=high, low=low, context={"timeframe": tf})  #.levels()
                 self.results[tf] = fib
         return self.results
 
