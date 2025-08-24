@@ -12,6 +12,7 @@ fibonacci.py
 - ابزارهایی برای ارزیابی تاریخی سطوح (touch/hit metrics)
 - فیلتر اسکلت برای اخبار (news-aware) و جایگاه برای گسترش
 - export برای رسم و ذخیرهٔ سطوح
+- قابلیت‌هایی برای تولید فیچرهای آمادهٔ RL و آپدیت لحظه‌ای (real_time_update)
 
 Dependencies:
 - numpy, pandas, scipy, sklearn
@@ -19,7 +20,6 @@ Dependencies:
 طراحی: ماژولار، تایپ شده، مستندسازی‌شده و همراه با comments برای گسترش آینده.
 
 """
-
 from __future__ import annotations
 
 import logging
@@ -43,6 +43,7 @@ DEFAULT_FIB_RATIOS = [23.6, 38.2, 50.0, 61.8, 78.6, 100.0, 127.2, 161.8]
 # -----------------------------
 # Utilities
 # -----------------------------
+
 
 def _validate_price_index(df: pd.DataFrame) -> None:
     """اطمینان از اینکه DataFrame دارای index datetime و مرتب است و ستون‌های OHLC وجود دارد."""
@@ -80,7 +81,7 @@ def atr(df: pd.DataFrame, window: int = 14, use_high_low: bool = True) -> pd.Ser
 class SwingDetector:
     """شناسایی نقاط swing (قله و دره) با روش find_peaks از scipy یا ZigZag-like logic.
 
-    خروجی تابع detect_swings: DataFrame با ستون‌های ['time','index','price','kind','prominence']
+    خروجی تابع detect_swings: DataFrame با ستون‌های ['time','idx','price','kind','prominence','confidence']
     where kind in {'peak','valley'}
 
     پارامترهای قابل تنظیم:
@@ -101,8 +102,9 @@ class SwingDetector:
         self.use_wicks = use_wicks
 
     def _price_series(self, df: pd.DataFrame) -> pd.Series:
+        # NOTE: For peaks we use 'close' series as baseline. If wicks logic needed,
+        # caller can pass df['high'] / df['low'] separately and post-process.
         if self.use_wicks == "wicks":
-            # Use typical price heuristics; choose high for peaks and low for valleys externally
             return df["close"]
         elif self.use_wicks == "bodies":
             return (df["open"] + df["close"]) / 2
@@ -120,8 +122,7 @@ class SwingDetector:
           - price
           - kind ('peak'|'valley')
           - prominence (float)
-
-        این متد از find_peaks برای تشخیص قله‌ها و معکوس آن برای دره‌ها استفاده می‌کند.
+          - confidence (0..1 normalized)
         """
         _validate_price_index(df)
 
@@ -130,10 +131,10 @@ class SwingDetector:
 
         # Determine prominence threshold if not set
         if self.min_prominence is None:
-            # Heuristic: use std of returns scaled
+            # Heuristic: use std of price scaled
             self.min_prominence = max(1e-8, float(np.nanstd(price) * 0.5))
 
-        # Detect peaks
+        # Detect peaks and valleys
         peaks, props_peaks = find_peaks(price,
                                         distance=self.min_distance_bars,
                                         prominence=self.min_prominence)
@@ -161,10 +162,11 @@ class SwingDetector:
 
         swings = pd.DataFrame(records).sort_values("idx").reset_index(drop=True)
         # Confidence score: normalize prominence
-        if not swings.empty:
-            swings["confidence"] = swings["prominence"] / (swings["prominence"].max() + 1e-9)
+        if not swings.empty and swings["prominence"].notna().any():
+            max_prom = swings["prominence"].max()
+            swings["confidence"] = swings["prominence"] / (max_prom + 1e-9)
         else:
-            swings["confidence"] = pd.Series(dtype=float)
+            swings["confidence"] = 0.0
         return swings
 
 
@@ -176,9 +178,9 @@ class FibonacciCore:
 
     متدها:
     - retracement: محاسبه سطوح بین swing high و swing low
-    - extension: محاسبه سطوح اکستنشن
+    - extension: محاسبه سطوح extension
     - projection: محاسبه پروجکشن (در صورت نیاز)
-
+    - multi_timeframe_retracement: ترکیب retracementها از چند تایم‌فریم
     همهٔ نسبت‌ها قابل پیکربندی هستند.
     """
 
@@ -189,47 +191,54 @@ class FibonacciCore:
     def _ordered_pair(a: float, b: float) -> Tuple[float, float]:
         return (a, b) if a <= b else (b, a)
 
-    def retracement(self, start_price: float, end_price: float) -> Dict[float, float]:
+    def retracement(self, start_price: float, end_price: float, *, context: Optional[Dict] = None) -> pd.DataFrame:
         """محاسبه سطوح retracement نسبت به بازهٔ start->end.
-
-        Returns a dict mapping ratio% -> price.
+        خروجی: DataFrame columns = ['ratio','price','type']
         """
-        # If trend down: start> end
-        levels = {}
+        records = []
         for r in self.ratios:
             frac = r / 100.0
-            # standard retracement: level = end + (start - end) * ratio
+            # convention: level = end + (start - end) * (1 - frac)
             level = end_price + (start_price - end_price) * (1 - frac)
-            # Alternative convention exists; callers should document expected output
-            levels[float(r)] = float(level)
-        return levels
+            records.append({"ratio": float(r), "price": float(level), "type": "retracement"})
+        return pd.DataFrame(records)
 
-    def extension(self, start_price: float, end_price: float) -> Dict[float, float]:
+    def extension(self, start_price: float, end_price: float, *, context: Optional[Dict] = None) -> pd.DataFrame:
         """محاسبه سطوح extension نسبت به بازهٔ start->end.
-
-        convention: extension at ratio r => price = end + (end - start) * r
-        where r is expressed as decimal (e.g., 1.272 for 127.2%).
+        خروجی: DataFrame columns = ['ratio','price','type']
         """
-        levels = {}
+        records = []
         for r in self.ratios:
             factor = r / 100.0
             level = end_price + (end_price - start_price) * factor
-            levels[float(r)] = float(level)
-        return levels
+            records.append({"ratio": float(r), "price": float(level), "type": "extension"})
+        return pd.DataFrame(records)
 
-    def projection(self, a: float, b: float, c: float, ratios: Optional[Iterable[float]] = None) -> Dict[float, float]:
+    def projection(self, a: float, b: float, c: float, *, ratios: Optional[Iterable[float]] = None,
+                   context: Optional[Dict] = None) -> pd.DataFrame:
         """Projection typical for harmonic patterns: project move BC based on AB length.
-
-        a,b,c : prices
+        returns DataFrame ['ratio','price','type']
         """
         if ratios is None:
             ratios = self.ratios
-        levels = {}
+        records = []
         ab = b - a
         bc = c - b
         for r in ratios:
-            levels[float(r)] = float(c + bc * (r / 100.0))
-        return levels
+            price = float(c + bc * (r / 100.0))
+            records.append({"ratio": float(r), "price": price, "type": "projection"})
+        return pd.DataFrame(records)
+
+    def multi_timeframe_retracement(self, swings: Dict[str, Tuple[float, float]]) -> pd.DataFrame:
+        """گیرندهٔ دیکشنری tf -> (high, low) و بازگرداندن retracementهای همهٔ تایم‌فریم‌ها یکپارچه شده."""
+        frames = []
+        for tf, (high, low) in swings.items():
+            df = self.retracement(high, low)
+            df["tf"] = tf
+            frames.append(df)
+        if frames:
+            return pd.concat(frames, ignore_index=True)
+        return pd.DataFrame(columns=["ratio", "price", "type", "tf"])
 
 
 # -----------------------------
@@ -266,7 +275,7 @@ class LevelClusterer:
                        timeframe: str = "1m") -> pd.DataFrame:
         """خوشه‌بندی یک لیست از سطوح نسبت به دیتافریم قیمت داده‌شده.
 
-        خروجی: DataFrame هر ردیف یک خوشه با مقادیر مرکز، strength, members, touch_count, last_touch
+        خروجی: DataFrame هر ردیف یک خوشه با مقادیر center/price, members, strength, touch_count, last_touch, timeframes
         """
         levels = np.array(sorted(set(float(l) for l in levels)))
         if levels.size == 0:
@@ -330,7 +339,7 @@ class LevelAnalyzer:
                             tolerance: float = 0.0) -> pd.DataFrame:
         """برای هر سطح، متریک‌هایی تولید می‌کند.
 
-        metrics: touch_count, hits (penetration), avg_bounce, time_to_hit_mean
+        metrics: level, touch_count, hit_count, hit_rate, avg_bounce
         """
         # Ensure numeric
         levels = sorted(set(float(l) for l in levels))
@@ -354,12 +363,10 @@ class LevelAnalyzer:
                 segment_low = prices.iloc[i: i + lookahead_bars].min()
                 if (segment_low - tolerance) <= level <= (segment_high + tolerance):
                     touches += 1
-                    # whether immediate penetration: check if next close is beyond level
-                    # simple heuristic: if any price beyond level within lookahead, count as hit
+                    # whether immediate penetration: check if any price beyond level within lookahead
                     if level <= segment_high and level >= segment_low:
                         hits += 1
                     # bounce: magnitude after touch (if exists)
-                    # simple: measure max excursion away from level inside lookahead
                     max_up = segment_high - level if segment_high > level else 0
                     max_down = level - segment_low if segment_low < level else 0
                     bounces.append(max(max_up, max_down))
@@ -526,12 +533,109 @@ class Exporter:
 
 
 # -----------------------------
+# Feature extraction for RL
+# -----------------------------
+class FeatureExtractor:
+    """تبدیل خروجی clusters/levels به فیچر‌های عددی مناسب برای مدل RL.
+
+    نکات:
+    - برای نرمال‌سازی از ATR استفاده می‌کنیم تا فیچرها در واحد volatility قرار بگیرند.
+    - خروجی می‌تواند DataFrame (برای هر کلاستر) و یا بردار numpy (ترکیبی) باشد.
+    """
+
+    def __init__(self, atr_series: Optional[pd.Series] = None):
+        self.atr_series = atr_series
+
+    @staticmethod
+    def _safe_get(series: pd.Series, idx: int, default: float = 0.0) -> float:
+        try:
+            return float(series.iloc[idx])
+        except Exception:
+            return default
+
+    def extract_features_from_cluster_row(self, row: pd.Series, current_price: float, atr_value: float) -> Dict[str, float]:
+        """گرفتن یک ردیف کلاستر و تولید فیچرهای کلیدی برای آن ردیف."""
+        price = float(row.get("price", current_price))
+        strength = float(row.get("strength", 0.0))
+        hit_rate = float(row.get("hit_rate", 0.0)) if row.get("hit_rate") is not None else 0.0
+        avg_bounce = float(row.get("avg_bounce", 0.0)) if row.get("avg_bounce") is not None else 0.0
+        members = row.get("members", [])
+        members_count = len(members) if isinstance(members, (list, tuple, np.ndarray)) else 1
+        tf_count = len(row.get("timeframes", {})) if isinstance(row.get("timeframes", {}), dict) else 1
+
+        # distance features (absolute and pct), normalized by ATR where possible
+        abs_dist = price - current_price
+        pct_dist = (abs_dist / current_price) if current_price != 0 else 0.0
+        atr_norm_dist = (abs_dist / atr_value) if atr_value and atr_value != 0 else abs_dist
+
+        # cluster width heuristic: max(member)-min(member)
+        width = float(np.max(members) - np.min(members)) if members_count > 1 else 0.0
+        width_norm = (width / atr_value) if atr_value and atr_value != 0 else width
+
+        # final features dictionary
+        features = {
+            "price": price,
+            "abs_dist": abs_dist,
+            "pct_dist": pct_dist,
+            "atr_norm_dist": atr_norm_dist,
+            "strength": strength,
+            "hit_rate": hit_rate,
+            "avg_bounce": avg_bounce,
+            "members_count": float(members_count),
+            "tf_count": float(tf_count),
+            "width": width,
+            "width_norm": width_norm,
+        }
+        return features
+
+    def extract_dataframe(self, clusters_df: pd.DataFrame, current_price: float, atr_value: float) -> pd.DataFrame:
+        """تبدیل clusters_df به DataFrame فیچر‌دار (هر ردیف یک کلاستر)."""
+        if clusters_df is None or clusters_df.empty:
+            return pd.DataFrame()
+        rows = []
+        for _, r in clusters_df.iterrows():
+            rows.append(self.extract_features_from_cluster_row(r, current_price, atr_value))
+        df = pd.DataFrame(rows)
+        # add some derived normalized features
+        if "atr_norm_dist" not in df.columns and atr_value:
+            df["atr_norm_dist"] = df["abs_dist"] / atr_value
+        return df
+
+    def to_vector(self, features_df: pd.DataFrame, top_k: int = 5) -> np.ndarray:
+        """تبدیل DataFrame فیچرها به بردار ثابت‌طول مناسب برای RL.
+        - strategy: انتخاب top_k بر اساس strength و سپس flatten ستون‌های مشخص.
+        - اگر تعداد کلاستر کمتر باشد با صفر-padding تکمیل می‌کند.
+        """
+        if features_df is None or features_df.empty:
+            return np.zeros(top_k * 6, dtype=float)  # default feature size (6 features per cluster)
+        # choose key features and sort by strength
+        features_df = features_df.sort_values("strength", ascending=False).reset_index(drop=True)
+        chosen = features_df.head(top_k)
+        vec = []
+        for _, r in chosen.iterrows():
+            vec.extend([
+                float(r.get("atr_norm_dist", 0.0)),
+                float(r.get("strength", 0.0)),
+                float(r.get("hit_rate", 0.0)),
+                float(r.get("avg_bounce", 0.0)),
+                float(r.get("members_count", 0.0)),
+                float(r.get("width_norm", 0.0)),
+            ])
+        # pad if needed
+        needed = top_k * 6 - len(vec)
+        if needed > 0:
+            vec.extend([0.0] * needed)
+        return np.array(vec, dtype=float)
+
+
+# -----------------------------
 # High-level orchestrator
 # -----------------------------
 class FibonacciEngine:
     """کلاس سطح بالا که ترکیب SwingDetector, FibonacciCore, LevelClusterer و OrderPlanner است.
 
     برای استفاده در ربات تریدر: این کلاس متدهایی برای تولید سطوح با وزن‌دهی و تولید پلان‌های معاملاتی ارائه می‌دهد.
+    همچنین امکاناتی برای آپدیت لحظه‌ای، تولید فیچر برای RL و نرمال‌سازی بر اساس ATR را فراهم می‌کند.
     """
 
     def __init__(self,
@@ -545,12 +649,18 @@ class FibonacciEngine:
         self.swing_detector = SwingDetector()
         self.clusterer = LevelClusterer(eps_atr_multiplier=cluster_eps_atr_mult, atr_window=atr_window)
         self.analyzer = LevelAnalyzer()
+        self.news_filter = NewsFilter()
+        self.atr_window = atr_window
         self.atr_series = atr(self.df, window=atr_window)
+        self.feature_extractor = FeatureExtractor(atr_series=self.atr_series)
+        # cache latest computed sets
+        self._last_raw_levels: Optional[pd.DataFrame] = None
+        self._last_clusters: Optional[pd.DataFrame] = None
 
     def generate_raw_levels(self) -> pd.DataFrame:
         """تشخیص سوئینگ و تولید سطوح فیبوناچی برای هر جفت swing (peak->valley و بالعکس).
 
-        خروجی: DataFrame با سطرهایی از نوع: time, level_price, ratio, kind, source
+        خروجی: DataFrame با سطرهایی از نوع: time, level_price, ratio, type
         """
         swings = self.swing_detector.detect_swings(self.df)
         records = []
@@ -561,17 +671,18 @@ class FibonacciEngine:
             start_price = s1["price"]
             end_price = s2["price"]
             # compute retracements and extensions for the move start->end
-            retr = self.core.retracement(start_price, end_price)
-            ext = self.core.extension(start_price, end_price)
+            retr_df = self.core.retracement(start_price, end_price)
+            ext_df = self.core.extension(start_price, end_price)
             t = s2["time"]
-            for ratio, price in retr.items():
-                records.append({"time": t, "level_price": price, "ratio": ratio, "type": "retracement"})
-            for ratio, price in ext.items():
-                records.append({"time": t, "level_price": price, "ratio": ratio, "type": "extension"})
+            for _, r in retr_df.iterrows():
+                records.append({"time": t, "level_price": r["price"], "ratio": r["ratio"], "type": r["type"]})
+            for _, r in ext_df.iterrows():
+                records.append({"time": t, "level_price": r["price"], "ratio": r["ratio"], "type": r["type"]})
         df_levels = pd.DataFrame(records)
         if not df_levels.empty:
             df_levels["time"] = pd.to_datetime(df_levels["time"])
             df_levels = df_levels.drop_duplicates(subset=["level_price", "ratio", "type"]).reset_index(drop=True)
+        self._last_raw_levels = df_levels
         return df_levels
 
     def cluster_and_score(self, df_levels: pd.DataFrame, timeframe: str = "1m") -> pd.DataFrame:
@@ -579,11 +690,15 @@ class FibonacciEngine:
 
         خروجی: DataFrame خوشه‌ها با ستون price, strength, touch_count, last_touch.
         """
-        if df_levels.empty:
+        if df_levels is None or df_levels.empty:
+            self._last_clusters = pd.DataFrame()
             return pd.DataFrame()
         # cluster
         clusters_df = self.clusterer.cluster_levels(df_levels["level_price"].values, self.df, timeframe=timeframe)
         # compute historical metrics for cluster centers
+        if clusters_df.empty:
+            self._last_clusters = clusters_df
+            return clusters_df
         stats = self.analyzer.compute_level_stats(clusters_df["price"].values, self.df["close"], lookahead_bars=50,
                                                   tolerance=0.0)
         # merge
@@ -598,6 +713,7 @@ class FibonacciEngine:
         # compute composite strength
         clusters_df["strength"] = clusters_df["strength"] * (1.0 + clusters_df["hit_rate"])  # simple heuristic
         clusters_df = clusters_df.sort_values("strength", ascending=False).reset_index(drop=True)
+        self._last_clusters = clusters_df
         return clusters_df
 
     def generate_entry_plans(self, clusters_df: pd.DataFrame, planner: OrderPlanner, lookback_atr: int = 14) -> List[OrderSpec]:
@@ -612,13 +728,83 @@ class FibonacciEngine:
             # decide side: if level above current price -> sell resistance else buy support
             side = "sell" if level_price > price_now else "buy"
             # use recent ATR value
-            atr_value = float(self.atr_series.iloc[-1])
+            atr_value = float(self.atr_series.iloc[-1]) if not self.atr_series.empty else 0.0
             plan = planner.make_entry_plan(level_price=level_price,
                                            side=side,
                                            price_now=price_now,
                                            atr_value=atr_value)
             plans.append(plan)
         return plans
+
+    # -----------------------------
+    # Real-time / incremental updates
+    # -----------------------------
+    def real_time_update(self, new_bar: Dict[str, Any]) -> None:
+        """آپدیت دیتافریم قیمت با یک کندل/تیک جدید و بروز کردن ATR cache.
+        new_bar باید شامل keys: ['time','open','high','low','close']، time قابل parse باشد.
+        این متد دیتافریم را append کرده و atr_series را مجدداً محاسبه می‌کند.
+        """
+        # Validate input minimality
+        try:
+            t = pd.to_datetime(new_bar["time"])
+            o = float(new_bar["open"])
+            h = float(new_bar["high"])
+            l = float(new_bar["low"])
+            c = float(new_bar["close"])
+        except Exception as e:
+            logger.error("Invalid new_bar provided to real_time_update: %s", e)
+            raise
+
+        # Append or update final row if timestamp exists
+        if t in self.df.index:
+            self.df.loc[t, ["open", "high", "low", "close"]] = [o, h, l, c]
+        else:
+            # append
+            row = pd.DataFrame([{"open": o, "high": h, "low": l, "close": c}], index=pd.DatetimeIndex([t]))
+            self.df = pd.concat([self.df, row]).sort_index()
+        # recompute atr_series tail (simple approach)
+        self.atr_series = atr(self.df, window=self.atr_window)
+        # invalidate caches
+        self._last_raw_levels = None
+        self._last_clusters = None
+
+    # -----------------------------
+    # Feature extraction helpers for RL
+    # -----------------------------
+    def compute_features_dataframe(self, clusters_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        """برگرداندن DataFrame فیچرها برای تمام کلاسترها؛ اگر clusters_df None باشد از کش استفاده می‌کند."""
+        if clusters_df is None:
+            if self._last_clusters is None:
+                # auto-generate clusters from raw levels
+                raw = self._last_raw_levels if self._last_raw_levels is not None else self.generate_raw_levels()
+                clusters_df = self.cluster_and_score(raw)
+            else:
+                clusters_df = self._last_clusters
+        price_now = float(self.df["close"].iloc[-1])
+        atr_value = float(self.atr_series.iloc[-1]) if not self.atr_series.empty else 0.0
+        return self.feature_extractor.extract_dataframe(clusters_df, price_now, atr_value)
+
+    def get_feature_vector_for_rl(self, clusters_df: Optional[pd.DataFrame] = None, top_k: int = 5) -> np.ndarray:
+        """برگرداندن بردار عددی ثابت‌طول مناسب برای مدل RL."""
+        df_feat = self.compute_features_dataframe(clusters_df)
+        return self.feature_extractor.to_vector(df_feat, top_k=top_k)
+
+    # -----------------------------
+    # Golden zone quick helper (simple)
+    # -----------------------------
+    def detect_golden_zones(self, clusters_df: Optional[pd.DataFrame] = None, zone_width_atr_mult: float = 0.5) -> pd.DataFrame:
+        """تشخیص سادهٔ Golden Zones براساس clusters: تبدیل هر کلاستر به zone around center با پهنای k*ATR."""
+        if clusters_df is None:
+            clusters_df = self._last_clusters if self._last_clusters is not None else self.cluster_and_score(self.generate_raw_levels())
+        if clusters_df is None or clusters_df.empty:
+            return pd.DataFrame()
+        atr_value = float(self.atr_series.iloc[-1]) if not self.atr_series.empty else 0.0
+        zones = []
+        for _, r in clusters_df.iterrows():
+            center = float(r["price"])
+            half = zone_width_atr_mult * atr_value
+            zones.append({"low": center - half, "high": center + half, "center": center, "strength": float(r.get("strength", 0.0))})
+        return pd.DataFrame(zones).sort_values("strength", ascending=False).reset_index(drop=True)
 
 
 # -----------------------------
@@ -629,7 +815,8 @@ class FibonacciEngine:
 # - این پیاده‌سازی روی readability و extensibility تمرکز دارد، نه حداکثر بهینه‌سازی سرعت.
 # - برای محیط‌های با نیاز latency خیلی کم، باید بخش‌های detect_swings و cluster_levels برداری و یا به Cython/Numba منتقل شوند.
 # - برای محاسبهٔ دقیق lot روی XAUUSD یا جفت‌های مختلف، pip_value و tick_size باید بر اساس قرارداد بروکر تنظیم شوند.
-
+# - FeatureExtractor.to_vector strategy و feature set را می‌توان متناسب با مدل RL (مثلاً ورود continuous/ discrete) تغییر داد.
+# - این نسخه همهٔ متدهای اصلی قبلی را حفظ کرده و قابلیت‌های feature-extraction و real-time update را به آن افزوده است.
 
 # Example usage (برای توسعه‌دهنده):
 # from fibonacci import FibonacciEngine, OrderPlanner
@@ -639,4 +826,6 @@ class FibonacciEngine:
 # clusters = eng.cluster_and_score(raw)
 # planner = OrderPlanner(risk_pct=0.5, account_equity=10000.0, pip_value=1.0)
 # plans = eng.generate_entry_plans(clusters, planner)
-
+# feats_df = eng.compute_features_dataframe(clusters)
+# rl_vec = eng.get_feature_vector_for_rl(clusters, top_k=5)
+# eng.real_time_update({"time": "2025-08-24 21:00:00", "open": 1950, "high": 1955, "low": 1948, "close": 1952})
