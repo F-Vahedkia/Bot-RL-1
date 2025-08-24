@@ -703,32 +703,6 @@ class ClusterParams:
 # ============================================================
 '''
 
-@dataclass
-class ClusterParams:
-    """
-    پیکربندی انعطاف‌پذیر برای تشخیص خوشه‌های همپوشان (Confluence Zones).
-    - دو نوع تلورانس را پشتیبانی می‌کند: نسبی (rel) بر حسب درصد/بِیسیس‌پوینت و مطلق (abs) بر حسب قیمت/پیپ.
-    - می‌توان حداقل تعداد برخورد (min_hits) تعیین کرد تا خوشه‌های ضعیف فیلتر شوند.
-    - وزن‌دهی اختیاری بر اساس method/ratio/timeframe برای محاسبه‌ی امتیاز.
-    """
-    tolerance_mode: str = "rel"        # "rel" یا "abs"
-    rel_tolerance: float = 0.001       # 0.001 ≈ 0.1% (100 bps)
-    abs_tolerance: Optional[float] = None  # اگر tolerance_mode="abs"، مثلاً 1.0 برای 1 دلار/پیپ
-    min_hits: int = 2                  # حداقل تعداد سطوح در یک خوشه
-    use_timeframe_diversity: bool = True  # اگر True، تنوع تایم‌فریم امتیاز را افزایش می‌دهد
-    method_weights: Dict[str, float] = field(default_factory=lambda: {
-        "retracement": 1.0,
-        "extension": 0.9,
-        "projection": 0.8
-    })
-    ratio_weights: Dict[float, float] = field(default_factory=lambda: {
-        0.236: 0.7, 0.382: 0.9, 0.5: 1.0, 0.618: 1.2, 0.786: 1.1,
-        1.272: 1.0, 1.618: 1.2, 2.0: 0.9, 2.618: 0.8
-    })
-    # امتیازدهی به تایم‌فریم‌ها (اختیاری). اگر خالی باشد، همه 1.0.
-    timeframe_weights: Dict[str, float] = field(default_factory=dict)
-
-
 class FibonacciClusterDetector:
     """
     تشخیص نواحی همپوشان سطوح فیبوناچی (Confluence / Cluster Zones)
